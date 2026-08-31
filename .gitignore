@@ -1,0 +1,4 @@
+.build/
+.attic/
+.DS_Store
+.swiftpm/
