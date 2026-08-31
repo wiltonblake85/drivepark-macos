@@ -124,3 +124,9 @@ consulted but not copied.
   Improvement surfaced:
   4. Flush stdout after each print (setvbuf/FileHandle) so `--hold` progress
      is visible when stdout is a pipe, not only a terminal.
+- Non-APFS support shipped (2026-08-31): discovery now includes direct
+  partitions (exFAT, FAT32, NTFS, HFS+); proven against a software exFAT
+  drive that Park unmounted, ejected, and fully detached. `--only diskN`
+  scopes park/release to one disk. Remaining edge cases: partitionless
+  "superfloppy" volumes, and APFS containers spanning multiple physical
+  stores (Fusion-style).

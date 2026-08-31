@@ -50,6 +50,11 @@ public struct PhysicalDisk {
     public var removableMedia = false
     public var ejectable = false
     public var containers: [Container] = []
+    public var directVolumes: [Volume] = []
+
+    /// Every volume on this disk: APFS container volumes plus direct
+    /// (non-APFS) partitions such as exFAT, FAT32, NTFS, or HFS+.
+    public var allVolumes: [Volume] { containers.flatMap { $0.volumes } + directVolumes }
 }
 
 public func formatSize(_ bytes: Int64) -> String {
@@ -59,7 +64,13 @@ public func formatSize(_ bytes: Int64) -> String {
 }
 
 public func discoverExternalDisks() -> [PhysicalDisk] {
-    guard let externalList = runDiskutil(["list", "-plist", "external", "physical"]),
+    // PARK_INCLUDE_VIRTUAL=1 includes attached disk images, used for
+    // filesystem tests without real hardware.
+    let includeVirtual = ProcessInfo.processInfo.environment["PARK_INCLUDE_VIRTUAL"] == "1"
+    let listArguments = includeVirtual
+        ? ["list", "-plist", "external"]
+        : ["list", "-plist", "external", "physical"]
+    guard let externalList = runDiskutil(listArguments),
           let externalWhole = externalList["WholeDisks"] as? [String] else {
         return []
     }
@@ -84,9 +95,36 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
         disks[device] = disk
     }
 
+    let skippedContent: Set<String> = [
+        "EFI", "Microsoft Reserved", "Apple_APFS", "Apple_APFS_ISC",
+        "Apple_APFS_Recovery", "Apple_Boot", "Apple_CoreStorage",
+        "Apple_KernelCoreDump", "Windows Recovery", "Linux Swap"
+    ]
     for entry in allEntries {
-        guard let containerDevice = entry["DeviceIdentifier"] as? String,
-              let stores = entry["APFSPhysicalStores"] as? [[String: Any]],
+        guard let entryDevice = entry["DeviceIdentifier"] as? String else { continue }
+
+        // Direct (non-APFS) partitions on an external disk: exFAT, FAT32,
+        // NTFS, HFS+, and similar mountable volumes.
+        if disks[entryDevice] != nil,
+           let partitions = entry["Partitions"] as? [[String: Any]] {
+            for partition in partitions {
+                guard let partitionDevice = partition["DeviceIdentifier"] as? String
+                else { continue }
+                let content = partition["Content"] as? String ?? ""
+                guard !skippedContent.contains(content) else { continue }
+                let name = partition["VolumeName"] as? String
+                let mountPoint = partition["MountPoint"] as? String
+                guard name != nil || mountPoint != nil else { continue }
+                disks[entryDevice]?.directVolumes.append(Volume(
+                    device: partitionDevice,
+                    name: name ?? "(unnamed)",
+                    mountPoint: mountPoint))
+            }
+        }
+
+        // Synthesized APFS containers mapped to their physical store.
+        let containerDevice = entryDevice
+        guard let stores = entry["APFSPhysicalStores"] as? [[String: Any]],
               let firstStore = stores.first?["DeviceIdentifier"] as? String
         else { continue }
         let physicalDisk = wholeDiskName(of: firstStore)

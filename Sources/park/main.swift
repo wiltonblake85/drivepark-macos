@@ -26,6 +26,12 @@ func printStatus() {
                 print("    volume \"\(volume.name)\" (\(volume.device)) — \(state)")
             }
         }
+        for volume in disk.directVolumes {
+            total += 1
+            if volume.isMounted { mounted += 1 }
+            let state = volume.isMounted ? "MOUNTED at \(volume.mountPoint ?? "?")" : "unmounted"
+            print("    volume \"\(volume.name)\" (\(volume.device), non-APFS) — \(state)")
+        }
         print("")
     }
 
@@ -44,7 +50,12 @@ case "status":
     printStatus()
 case "now":
     let engine = Engine()
-    let outcome = engine.park { print($0) }
+    var onlyDisks: Set<String>? = nil
+    if let flagIndex = arguments.firstIndex(of: "--only") {
+        let valueIndex = arguments.index(after: flagIndex)
+        if arguments.indices.contains(valueIndex) { onlyDisks = [arguments[valueIndex]] }
+    }
+    let outcome = engine.park(onlyDisks: onlyDisks) { print($0) }
     for note in outcome.notes { print(note) }
     if outcome.parked {
         print("\nPARKED. All volumes verified unmounted. Safe to power off the enclosure.")
@@ -72,6 +83,6 @@ case "release":
     print("\(mounted) of \(total) external volume(s) mounted.")
     if mounted < total { exit(1) }
 default:
-    print("usage: park [status | now [--hold] | release]")
+    print("usage: park [status | now [--hold] [--only diskN] | release]")
     exit(64)
 }

@@ -39,27 +39,26 @@ public final class Engine {
 
     public var isVetoActive: Bool { !parkedVolumeUUIDs.isEmpty }
 
-    public func park(progress: (String) -> Void = { _ in }) -> ParkOutcome {
+    public func park(onlyDisks: Set<String>? = nil,
+                     progress: (String) -> Void = { _ in }) -> ParkOutcome {
         guard let ops else {
             return ParkOutcome(results: [], stillMounted: [],
                                notes: ["Disk Arbitration session unavailable"])
         }
         let disks = discoverExternalDisks()
+            .filter { onlyDisks?.contains($0.device) ?? true }
         var vetoUUIDs: Set<String> = []
         for disk in disks {
-            for container in disk.containers {
-                for volume in container.volumes {
-                    if let uuid = volumeUUID(of: volume.device) {
-                        vetoUUIDs.insert(uuid.lowercased())
-                    }
+            for volume in disk.allVolumes {
+                if let uuid = volumeUUID(of: volume.device) {
+                    vetoUUIDs.insert(uuid.lowercased())
                 }
             }
         }
 
         var results: [VolumeParkResult] = []
         for disk in disks {
-            for container in disk.containers {
-                for volume in container.volumes where volume.isMounted {
+            for volume in disk.allVolumes where volume.isMounted {
                     var success = false
                     var blockers: [String] = []
                     for (attempt, delay) in Self.retryDelays.enumerated() {
@@ -75,20 +74,19 @@ public final class Engine {
                             }
                         }
                     }
-                    results.append(VolumeParkResult(volume: volume, success: success, blockers: blockers))
-                }
+                results.append(VolumeParkResult(volume: volume, success: success, blockers: blockers))
             }
         }
 
         // VERIFY with a fresh read. Never trust the callbacks alone.
         let after = discoverExternalDisks()
-        let stillMounted = after.flatMap { $0.containers }.flatMap { $0.volumes }
-            .filter { $0.isMounted }
+            .filter { onlyDisks?.contains($0.device) ?? true }
+        let stillMounted = after.flatMap { $0.allVolumes }.filter { $0.isMounted }
 
         // Courtesy spin-down for each fully-unmounted physical disk.
         var notes: [String] = []
         for disk in after {
-            let anyMounted = disk.containers.flatMap { $0.volumes }.contains { $0.isMounted }
+            let anyMounted = disk.allVolumes.contains { $0.isMounted }
             guard !anyMounted else { continue }
             let result = ops.eject(diskBSDName: disk.device)
             let attached = ops.isAttached(diskBSDName: disk.device)
@@ -106,23 +104,25 @@ public final class Engine {
         return ParkOutcome(results: results, stillMounted: stillMounted, notes: notes)
     }
 
-    public func release(progress: (String) -> Void = { _ in }) -> (mounted: Int, total: Int) {
+    public func release(onlyDisks: Set<String>? = nil,
+                        progress: (String) -> Void = { _ in }) -> (mounted: Int, total: Int) {
         parkedVolumeUUIDs = []
         guard let ops else { return (0, 0) }
         let disks = discoverExternalDisks()
+            .filter { onlyDisks?.contains($0.device) ?? true }
         for disk in disks {
-            for container in disk.containers {
-                for volume in container.volumes where !volume.isMounted {
-                    progress("Mounting \(volume.displayName)")
-                    let result = ops.mount(volumeBSDName: volume.device)
-                    if !result.success {
-                        progress("\(volume.displayName) failed: \(result.detail ?? "unknown")")
-                    }
+            for volume in disk.allVolumes where !volume.isMounted {
+                progress("Mounting \(volume.displayName)")
+                let result = ops.mount(volumeBSDName: volume.device)
+                if !result.success {
+                    progress("\(volume.displayName) failed: \(result.detail ?? "unknown")")
                 }
             }
         }
         // VERIFY with a fresh read.
-        let after = discoverExternalDisks().flatMap { $0.containers }.flatMap { $0.volumes }
+        let after = discoverExternalDisks()
+            .filter { onlyDisks?.contains($0.device) ?? true }
+            .flatMap { $0.allVolumes }
         return (after.filter { $0.isMounted }.count, after.count)
     }
 }

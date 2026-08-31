@@ -35,7 +35,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    var volumes: [Volume] { disks.flatMap { $0.containers }.flatMap { $0.volumes } }
+    var volumes: [Volume] { disks.flatMap { $0.allVolumes } }
     var mountedCount: Int { volumes.filter { $0.isMounted }.count }
     var isParked: Bool { !volumes.isEmpty && mountedCount == 0 }
 
