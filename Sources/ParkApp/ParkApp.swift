@@ -59,20 +59,20 @@ final class AppState: ObservableObject {
         }
     }
 
-    func park() {
+    func park(only: Set<String>? = nil, label: String? = nil) {
         guard !busy else { return }
         busy = true
         message = "Parking…"
         let engine = self.engine
         Task.detached {
-            let outcome = engine.park()
+            let outcome = engine.park(onlyDisks: only)
             let found = engine.discover()
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.disks = found
                 self.busy = false
                 if outcome.parked {
-                    self.message = "Parked. Safe to power off the tower."
+                    self.message = label.map { "\($0) parked." } ?? "Parked. Safe to power off the tower."
                 } else {
                     let names = outcome.stillMounted.map { $0.displayName }.joined(separator: ", ")
                     var text = "Not parked. Still mounted: \(names)."
@@ -83,21 +83,25 @@ final class AppState: ObservableObject {
         }
     }
 
-    func release() {
+    func release(only: Set<String>? = nil, label: String? = nil) {
         guard !busy else { return }
         busy = true
         message = "Remounting…"
         let engine = self.engine
         Task.detached {
-            let (mounted, total) = engine.release()
+            let (mounted, total) = engine.release(onlyDisks: only)
             let found = engine.discover()
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.disks = found
                 self.busy = false
-                self.message = mounted == total
-                    ? "All volumes back online."
-                    : "\(mounted) of \(total) volumes mounted."
+                if let label {
+                    self.message = "\(label) back online."
+                } else {
+                    self.message = mounted == total
+                        ? "All volumes back online."
+                        : "\(mounted) of \(total) volumes mounted."
+                }
             }
         }
     }
@@ -109,8 +113,17 @@ struct MenuContent: View {
     var body: some View {
         Text(state.statusLine)
         Divider()
-        ForEach(state.volumes, id: \.device) { volume in
-            Text("\(volume.displayName) — \(volume.isMounted ? "mounted" : "parked")")
+        ForEach(state.disks, id: \.device) { disk in
+            let mountedHere = disk.allVolumes.contains { $0.isMounted }
+            let label = disk.allVolumes.map { $0.displayName }.joined(separator: ", ")
+            Button(mountedHere ? "Park \(label)" : "Release \(label)") {
+                if mountedHere {
+                    state.park(only: [disk.device], label: label)
+                } else {
+                    state.release(only: [disk.device], label: label)
+                }
+            }
+            .disabled(state.busy || disk.allVolumes.isEmpty)
         }
         Divider()
         Button(state.busy ? "Working…" : "Park Tower") {

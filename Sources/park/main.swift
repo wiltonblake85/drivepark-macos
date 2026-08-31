@@ -58,7 +58,11 @@ case "now":
     let outcome = engine.park(onlyDisks: onlyDisks) { print($0) }
     for note in outcome.notes { print(note) }
     if outcome.parked {
-        print("\nPARKED. All volumes verified unmounted. Safe to power off the enclosure.")
+        if onlyDisks == nil {
+            print("\nPARKED. All volumes verified unmounted. Safe to power off the enclosure.")
+        } else {
+            print("\nPARKED. Selected drive verified unmounted. Other drives in the enclosure may still be mounted.")
+        }
         if arguments.contains("--hold") {
             print("Holding park: remount attempts will be refused. Ctrl-C to stop holding.")
             signal(SIGINT, SIG_IGN)
@@ -79,10 +83,15 @@ case "now":
     }
 case "release":
     let engine = Engine()
-    let (mounted, total) = engine.release { print($0) }
+    var releaseOnly: Set<String>? = nil
+    if let flagIndex = arguments.firstIndex(of: "--only") {
+        let valueIndex = arguments.index(after: flagIndex)
+        if arguments.indices.contains(valueIndex) { releaseOnly = [arguments[valueIndex]] }
+    }
+    let (mounted, total) = engine.release(onlyDisks: releaseOnly) { print($0) }
     print("\(mounted) of \(total) external volume(s) mounted.")
     if mounted < total { exit(1) }
 default:
-    print("usage: park [status | now [--hold] [--only diskN] | release]")
+    print("usage: park [status | now [--hold] [--only diskN] | release [--only diskN]]")
     exit(64)
 }

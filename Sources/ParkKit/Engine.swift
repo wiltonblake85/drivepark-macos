@@ -99,17 +99,29 @@ public final class Engine {
             }
         }
 
-        // Arm the remount veto only after a fully verified park.
-        if stillMounted.isEmpty { parkedVolumeUUIDs = vetoUUIDs }
+        // Arm the remount veto only after a fully verified park. Union, so
+        // per-drive parks accumulate instead of replacing each other.
+        if stillMounted.isEmpty { parkedVolumeUUIDs.formUnion(vetoUUIDs) }
         return ParkOutcome(results: results, stillMounted: stillMounted, notes: notes)
     }
 
     public func release(onlyDisks: Set<String>? = nil,
                         progress: (String) -> Void = { _ in }) -> (mounted: Int, total: Int) {
-        parkedVolumeUUIDs = []
         guard let ops else { return (0, 0) }
         let disks = discoverExternalDisks()
             .filter { onlyDisks?.contains($0.device) ?? true }
+        // Drop the veto for exactly what is being released.
+        if onlyDisks == nil {
+            parkedVolumeUUIDs = []
+        } else {
+            for disk in disks {
+                for volume in disk.allVolumes {
+                    if let uuid = volumeUUID(of: volume.device) {
+                        parkedVolumeUUIDs.remove(uuid.lowercased())
+                    }
+                }
+            }
+        }
         for disk in disks {
             for volume in disk.allVolumes where !volume.isMounted {
                 progress("Mounting \(volume.displayName)")
