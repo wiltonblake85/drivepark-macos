@@ -4,3 +4,4 @@
 .swiftpm/
 FEATURES.md
 HANDOFF.md
+dist/
