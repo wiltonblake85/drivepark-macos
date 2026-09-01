@@ -81,10 +81,13 @@ DISCOVER -> UNMOUNT -> VERIFY -> PARK (hold) -> REPORT, plus UNPARK.
 
 ## 6. Non-goals for v1
 
-No sleep automation, no menu bar UI, no privileged helper (user-level
-unmounts sufficed in the diagnostic; add a helper in v1.5 only if real
-dissents demand it), no encrypted-APFS unlocking, no localization. The menu
-bar app wraps this engine only after the CLI survives daily use.
+No privileged helper (user-level unmounts sufficed in the diagnostic; add a
+helper in v1.5 only if real dissents demand it), no encrypted-APFS unlocking,
+no localization.
+
+Superseded 2026-09-01: this section used to rule out the menu bar UI and sleep
+automation. Both shipped. The menu bar app wraps the engine, and automatic
+parking on sleep, display-off and screen lock landed in v0.2.
 
 ## 7. Verification principle (the product)
 
@@ -126,6 +129,25 @@ consulted but not copied.
   Improvement surfaced:
   4. Flush stdout after each print (setvbuf/FileHandle) so `--hold` progress
      is visible when stdout is a pipe, not only a terminal.
+- Sleep acknowledgement, a v0.2 design rule. kIOMessageSystemWillSleep holds
+  sleep open until IOAllowPowerChange answers, and macOS waits roughly 30 s
+  before it stops caring. The retry ladder alone can burn 17 s in sleeps before
+  any unmount work happens, so a sleep-triggered park runs against a 20 s
+  deadline, and a backstop acknowledges at 22 s whatever the park managed.
+  Sleep is never vetoed. A drive tool that keeps your Mac awake is a worse bug
+  than an unparked drive.
+- Enclosure stall (2026-08-31, found by accident, fixed the same night). The
+  TDAS bridge stopped answering `diskutil info` on all three bays while
+  `diskutil list`, `df`, and `diskutil info` on the internal disk kept working.
+  Every diskutil call the tool made blocked in read() with no timeout, so the
+  CLI hung forever and the menu bar app's 30-second refresh timer stacked up a
+  new hung child process every cycle, in silence, six of them before anyone
+  looked. A tool that promises the truth about stuck drives cannot hang on one.
+  Fixed: a 10 s timeout on every diskutil call, both pipes drained because an
+  undrained stderr is its own deadlock, a timed-out disk reported as NOT
+  ANSWERING instead of with "?" in every field, and a refresh timer that
+  refuses to overlap itself. Verified against the live stall: 30 s to a full
+  honest report, where the previous build never returned at all.
 - Non-APFS support shipped (2026-08-31): discovery now includes direct
   partitions (exFAT, FAT32, NTFS, HFS+); proven against a software exFAT
   drive that DrivePark unmounted, ejected, and fully detached. `--only diskN`

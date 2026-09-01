@@ -39,7 +39,13 @@ public final class Engine {
 
     public var isVetoActive: Bool { !parkedVolumeUUIDs.isEmpty }
 
+    /// - Parameter deadline: when set, the retry ladder stops once passed. The
+    ///   sleep path needs this: macOS gives roughly 30 s between
+    ///   kIOMessageSystemWillSleep and a forced sleep, and the full ladder can
+    ///   outlast it. A park cut short by the deadline reports what it reached,
+    ///   it does not claim more.
     public func park(onlyDisks: Set<String>? = nil,
+                     deadline: Date? = nil,
                      progress: (String) -> Void = { _ in }) -> ParkOutcome {
         guard let ops else {
             return ParkOutcome(results: [], stillMounted: [],
@@ -61,8 +67,27 @@ public final class Engine {
             for volume in disk.allVolumes where volume.isMounted {
                     var success = false
                     var blockers: [String] = []
+                    var ranOutOfTime = false
                     for (attempt, delay) in Self.retryDelays.enumerated() {
-                        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+                        if let deadline, Date() >= deadline {
+                            ranOutOfTime = true
+                            progress("\(volume.displayName): out of time before attempt \(attempt + 1)")
+                            break
+                        }
+                        if delay > 0 {
+                            // Never sleep past the deadline waiting to retry.
+                            if let deadline {
+                                let remaining = deadline.timeIntervalSinceNow
+                                if remaining <= 0 {
+                                    ranOutOfTime = true
+                                    progress("\(volume.displayName): out of time before attempt \(attempt + 1)")
+                                    break
+                                }
+                                Thread.sleep(forTimeInterval: min(delay, remaining))
+                            } else {
+                                Thread.sleep(forTimeInterval: delay)
+                            }
+                        }
                         progress("Unmounting \(volume.displayName), attempt \(attempt + 1)/\(Self.retryDelays.count)")
                         let result = ops.unmount(volumeBSDName: volume.device)
                         if result.success { success = true; break }
@@ -73,6 +98,9 @@ public final class Engine {
                                 progress("\(volume.displayName) blocked by " + found.joined(separator: ", "))
                             }
                         }
+                    }
+                    if ranOutOfTime && blockers.isEmpty {
+                        blockers = ["ran out of time before macOS forced sleep"]
                     }
                 results.append(VolumeParkResult(volume: volume, success: success, blockers: blockers))
             }

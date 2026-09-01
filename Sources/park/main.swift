@@ -15,8 +15,12 @@ func printStatus() {
     var total = 0
     print("PARK STATUS — \(disks.count) external disk(s)\n")
     for disk in disks {
-        let media = disk.removableMedia ? "removable" : "FIXED (eject cannot detach)"
-        print("\(disk.device)  \(disk.mediaName)  \(formatSize(disk.sizeBytes))  \(disk.busProtocol)  media: \(media)")
+        if disk.infoAnswered {
+            let media = disk.removableMedia ? "removable" : "FIXED (eject cannot detach)"
+            print("\(disk.device)  \(disk.mediaName)  \(formatSize(disk.sizeBytes))  \(disk.busProtocol)  media: \(media)")
+        } else {
+            print("\(disk.device)  NOT ANSWERING (diskutil info timed out; volumes below come from diskutil list)")
+        }
         for container in disk.containers {
             print("  container \(container.device) (store \(container.physicalStore))")
             for volume in container.volumes {
@@ -32,6 +36,14 @@ func printStatus() {
             let state = volume.isMounted ? "MOUNTED at \(volume.mountPoint ?? "?")" : "unmounted"
             print("    volume \"\(volume.name)\" (\(volume.device), non-APFS) — \(state)")
         }
+        print("")
+    }
+
+    if DiskutilTimeout.occurred {
+        print("WARNING: \(DiskutilTimeout.total) diskutil call(s) timed out.")
+        print("The enclosure is not answering detail queries. Volume state below")
+        print("is still accurate; disk details are not. Power-cycling the")
+        print("enclosure is usually what clears this.")
         print("")
     }
 

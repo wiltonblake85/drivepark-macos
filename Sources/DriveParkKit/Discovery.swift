@@ -2,20 +2,86 @@
 
 import Foundation
 
-func runDiskutil(_ args: [String]) -> [String: Any]? {
+/// Set when the last diskutil call gave up waiting. Read it right after a
+/// discovery to tell "this enclosure answered and has nothing" apart from
+/// "this enclosure stopped answering".
+public struct DiskutilTimeout {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var count = 0
+
+    static func record() {
+        lock.lock(); defer { lock.unlock() }
+        count += 1
+    }
+
+    static func reset() {
+        lock.lock(); defer { lock.unlock() }
+        count = 0
+    }
+
+    public static var occurred: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return count > 0
+    }
+
+    public static var total: Int {
+        lock.lock(); defer { lock.unlock() }
+        return count
+    }
+}
+
+/// Runs diskutil and gives up rather than waiting forever.
+///
+/// Observed on the TerraMaster DAS on 2026-08-31: the bridge stopped answering
+/// `diskutil info` on all three bays while `diskutil list` and `df` kept
+/// working. Every caller blocked in read() forever. A tool whose whole promise
+/// is telling the truth about stuck drives must not itself hang on one.
+///
+/// Both pipes are drained. Reading stdout while leaving stderr undrained
+/// deadlocks as soon as a command is verbose enough to fill that buffer.
+func runDiskutil(_ args: [String], timeout: TimeInterval = 10) -> [String: Any]? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
     process.arguments = args
     let out = Pipe()
+    let err = Pipe()
     process.standardOutput = out
-    process.standardError = Pipe()
+    process.standardError = err
     do { try process.run() } catch { return nil }
-    let data = out.fileHandleForReading.readDataToEndOfFile()
+
+    let readers = DispatchQueue(label: "drivepark.diskutil.read", attributes: .concurrent)
+    let group = DispatchGroup()
+    let box = DataBox()
+    readers.async(group: group) {
+        box.set(out.fileHandleForReading.readDataToEndOfFile())
+    }
+    readers.async(group: group) {
+        _ = err.fileHandleForReading.readDataToEndOfFile()
+    }
+
+    if group.wait(timeout: .now() + timeout) == .timedOut {
+        DiskutilTimeout.record()
+        process.terminate()
+        if group.wait(timeout: .now() + 2) == .timedOut, process.isRunning {
+            // A process blocked in the kernel on an unresponsive USB bridge
+            // does not always answer SIGTERM.
+            kill(process.processIdentifier, SIGKILL)
+        }
+        return nil
+    }
+
     process.waitUntilExit()
     guard process.terminationStatus == 0,
           let plist = try? PropertyListSerialization.propertyList(
-              from: data, options: [], format: nil) else { return nil }
+              from: box.get(), options: [], format: nil) else { return nil }
     return plist as? [String: Any]
+}
+
+private final class DataBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+    func set(_ value: Data) { lock.lock(); data = value; lock.unlock() }
+    func get() -> Data { lock.lock(); defer { lock.unlock() }; return data }
 }
 
 func volumeUUID(of device: String) -> String? {
@@ -49,6 +115,11 @@ public struct PhysicalDisk {
     public var sizeBytes: Int64 = 0
     public var removableMedia = false
     public var ejectable = false
+    /// False when `diskutil info` for this disk timed out. The disk still
+    /// exists and its volumes are still known from `diskutil list`; what is
+    /// missing is the detail, and saying so beats printing "?" as if it were
+    /// an answer.
+    public var infoAnswered = true
     public var containers: [Container] = []
     public var directVolumes: [Volume] = []
 
@@ -70,6 +141,7 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
     let listArguments = includeVirtual
         ? ["list", "-plist", "external"]
         : ["list", "-plist", "external", "physical"]
+    DiskutilTimeout.reset()
     guard let externalList = runDiskutil(listArguments),
           let externalWhole = externalList["WholeDisks"] as? [String] else {
         return []
@@ -91,6 +163,8 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
             disk.removableMedia = info["RemovableMedia"] as? Bool
                 ?? info["Removable"] as? Bool ?? false
             disk.ejectable = info["Ejectable"] as? Bool ?? false
+        } else {
+            disk.infoAnswered = false
         }
         disks[device] = disk
     }
