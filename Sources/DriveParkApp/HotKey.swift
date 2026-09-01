@@ -14,6 +14,7 @@
 
 import AppKit
 import Carbon.HIToolbox
+import DriveParkKit
 
 @MainActor
 final class HotKeyCenter {
@@ -29,14 +30,15 @@ final class HotKeyCenter {
     /// Runs on the main thread when the combination is pressed.
     var action: (() -> Void)?
 
-    /// Control + Option + Command + P. Four-finger combinations are chosen to
-    /// be hard to hit by accident, since this one unmounts drives.
-    static let defaultKeyCode = UInt32(kVK_ANSI_P)
-    static let defaultModifiers = UInt32(controlKey | optionKey | cmdKey)
+    /// Whatever the user recorded, defaulting to Control Option Command P.
+    /// Four-finger combinations are chosen to be hard to hit by accident,
+    /// since this one unmounts drives.
+    static var keyCode: UInt32 { Preferences.hotKeyCode }
+    static var modifiers: UInt32 { Preferences.hotKeyModifiers }
 
     /// Human-readable, for the menu. If the menu says a shortcut exists, the
     /// shortcut has to exist.
-    static let displayName = "⌃⌥⌘P"
+    static var displayName: String { Preferences.hotKeyDisplay }
 
     private(set) var isRegistered = false
     private(set) var failure: String?
@@ -74,7 +76,7 @@ final class HotKeyCenter {
 
         let hotKeyID = EventHotKeyID(signature: Self.signature, id: Self.identifier)
         var created: EventHotKeyRef?
-        let status = RegisterEventHotKey(Self.defaultKeyCode, Self.defaultModifiers,
+        let status = RegisterEventHotKey(Self.keyCode, Self.modifiers,
                                          hotKeyID, GetApplicationEventTarget(), 0, &created)
         guard status == noErr, created != nil else {
             failure = "\(Self.displayName) is already taken by another app."

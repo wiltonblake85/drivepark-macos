@@ -40,6 +40,8 @@ final class AppState: ObservableObject {
     /// unmount time is bimodal, half a second or eleven, so a countdown would
     /// be wrong a third of the time and you would learn to distrust it.
     @Published var hotKeyEnabled: Bool = Preferences.hotKeyEnabled
+    @Published var hotKeyDisplay: String = Preferences.hotKeyDisplay
+    @Published var hotKeySystemConflict: String?
     /// Armed triggers that cannot currently fire, keyed by trigger.
     @Published var triggerWarnings: [ParkTrigger: String] = [:]
     /// Volumes the last park could not unmount, and who was holding them.
@@ -374,6 +376,18 @@ final class AppState: ObservableObject {
         }
     }
 
+    func openShortcutRecorder() {
+        ShortcutRecorder.shared.onSaved = { [weak self] in
+            guard let self else { return }
+            self.hotKeyDisplay = Preferences.hotKeyDisplay
+            self.applyHotKey()
+            self.message = HotKeyCenter.shared.isRegistered
+                ? "Shortcut is \(Preferences.hotKeyDisplay)."
+                : (HotKeyCenter.shared.failure ?? "Shortcut unavailable.")
+        }
+        ShortcutRecorder.shared.show()
+    }
+
     func applyHotKey() {
         if Preferences.hotKeyEnabled {
             HotKeyCenter.shared.action = { [weak self] in self?.hotKeyPressed() }
@@ -384,6 +398,24 @@ final class AppState: ObservableObject {
             HotKeyCenter.shared.unregister()
         }
         hotKeyEnabled = Preferences.hotKeyEnabled
+        hotKeyDisplay = Preferences.hotKeyDisplay
+        // Readable from outside the app, so the shortcut can be checked
+        // without opening a menu nobody else can see.
+        // Registration success is not proof it fires. A shortcut the system
+        // owns registers fine and is then eaten before we see it.
+        if Preferences.hotKeyEnabled,
+           let owner = SystemShortcuts.owner(keyCode: Preferences.hotKeyCode,
+                                             carbonModifiers: Preferences.hotKeyModifiers) {
+            hotKeySystemConflict = "\(Preferences.hotKeyDisplay) belongs to \(owner), so it will never fire."
+        } else {
+            hotKeySystemConflict = nil
+        }
+        Preferences.recordDiagnostic("hotKeyConflict", hotKeySystemConflict ?? "none")
+        Preferences.recordDiagnostic("hotKey", Preferences.hotKeyEnabled
+            ? "\(Preferences.hotKeyDisplay) code=\(Preferences.hotKeyCode) "
+                + "mods=\(Preferences.hotKeyModifiers) "
+                + (HotKeyCenter.shared.isRegistered ? "REGISTERED" : "FAILED")
+            : "disabled")
     }
 
     func setHotKeyEnabled(_ on: Bool) {
@@ -398,6 +430,7 @@ final class AppState: ObservableObject {
 
     var hotKeyLine: String {
         if !Preferences.hotKeyEnabled { return "Global shortcut: off" }
+        if let conflict = hotKeySystemConflict { return "⚠︎ \(conflict)" }
         if HotKeyCenter.shared.isRegistered {
             return "Global shortcut: \(HotKeyCenter.displayName)"
         }
@@ -457,7 +490,7 @@ struct MenuContent: View {
             state.triggersNoteManualPark()
             state.park()
         }
-        .keyboardShortcut("p", modifiers: [.control, .option, .command])
+
         .disabled(state.busy || state.isParked || state.volumes.isEmpty)
         Button("Release (remount all)") {
             state.release()
@@ -502,9 +535,13 @@ struct MenuContent: View {
                 set: { state.setLaunchAtLogin($0) }))
             Divider()
             Text(state.hotKeyLine)
-            Toggle("Global shortcut (\(HotKeyCenter.displayName))", isOn: Binding(
+            Toggle("Global shortcut", isOn: Binding(
                 get: { state.hotKeyEnabled },
                 set: { state.setHotKeyEnabled($0) }))
+            Button("Change shortcut (\(state.hotKeyDisplay))…") {
+                state.openShortcutRecorder()
+            }
+            .disabled(!state.hotKeyEnabled)
         }
 
         if !state.message.isEmpty {

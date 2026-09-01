@@ -96,6 +96,52 @@ public enum Preferences {
         store.set(value, forKey: "diag_\(key)")
     }
 
+    // MARK: - The global shortcut
+    //
+    // Stored as the raw key code plus Carbon modifier mask, because that is
+    // what RegisterEventHotKey takes, plus a display string captured at
+    // recording time. The display string is stored rather than derived: going
+    // from a key code back to a printed character means asking the current
+    // keyboard layout, and a shortcut recorded on one layout should still read
+    // correctly after the user switches to another.
+
+    private static let hotKeyCodeKey = "hotKeyCode"
+    private static let hotKeyModifiersKey = "hotKeyModifiers"
+    private static let hotKeyDisplayKey = "hotKeyDisplay"
+
+    /// kVK_ANSI_P. Four-finger default, chosen to be hard to hit by accident.
+    public static let defaultHotKeyCode: UInt32 = 35
+    /// controlKey | optionKey | cmdKey
+    public static let defaultHotKeyModifiers: UInt32 = 4096 | 2048 | 256
+    public static let defaultHotKeyDisplay = "⌃⌥⌘P"
+
+    public static var hotKeyCode: UInt32 {
+        get {
+            let stored = store.object(forKey: hotKeyCodeKey) as? Int
+            return stored.map(UInt32.init) ?? defaultHotKeyCode
+        }
+        set { store.set(Int(newValue), forKey: hotKeyCodeKey) }
+    }
+
+    public static var hotKeyModifiers: UInt32 {
+        get {
+            let stored = store.object(forKey: hotKeyModifiersKey) as? Int
+            return stored.map(UInt32.init) ?? defaultHotKeyModifiers
+        }
+        set { store.set(Int(newValue), forKey: hotKeyModifiersKey) }
+    }
+
+    public static var hotKeyDisplay: String {
+        get { store.string(forKey: hotKeyDisplayKey) ?? defaultHotKeyDisplay }
+        set { store.set(newValue, forKey: hotKeyDisplayKey) }
+    }
+
+    public static func resetHotKeyToDefault() {
+        hotKeyCode = defaultHotKeyCode
+        hotKeyModifiers = defaultHotKeyModifiers
+        hotKeyDisplay = defaultHotKeyDisplay
+    }
+
     /// Global shortcut on or off. Default on: a hotkey nobody knows about is
     /// the same as no hotkey, and the menu shows the combination next to the
     /// action so it is discoverable rather than folklore.
