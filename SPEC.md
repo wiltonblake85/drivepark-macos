@@ -8,10 +8,11 @@ directly to the Mac, so the enclosure bridge is the governing hardware fact.
 
 ## 1. Problem statement (what the evidence showed)
 
-1. Ejectify ejects the synthesized APFS container (disk5/7/9), never the
-   physical disk (disk4/6/8). Disk Arbitration reports success in ~8 ms and
-   macOS re-synthesizes the container from the still-attached physical store.
-   The codebase contains no APFS physical-store mapping at all.
+1. Eject tools in this category act on the synthesized APFS container
+   (disk5/7/9), never the physical disk underneath it (disk4/6/8). Disk
+   Arbitration reports success in ~8 ms and macOS re-synthesizes the container
+   from the still-attached physical store. The mapping that would prevent this,
+   APFS container to physical store, is absent from the source I read.
 2. Even a correct physical-disk eject does not stick: the TDAS bridge reports
    its media as Fixed (non-removable), so the eject verb cannot detach it.
    `diskutil eject disk4` printed "ejected" while disk4 remained attached with
@@ -88,8 +89,9 @@ bar app wraps this engine only after the CLI survives daily use.
 ## 7. Verification principle (the product)
 
 Never report success from a callback. Every claim the tool makes is a fresh
-read of system state. This is the differentiator: Ejectify and diskutil both
-said "ejected" today while all three disks stayed attached.
+read of system state. This is the differentiator: on the day of the diagnosis,
+both `diskutil` and a paid ejection utility reported "ejected" while all three
+disks stayed attached.
 
 ## 8. Test plan (this hardware is the test bench)
 
