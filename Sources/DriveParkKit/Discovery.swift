@@ -98,6 +98,15 @@ public struct Volume {
     public let device: String
     public let name: String
     public let mountPoint: String?
+    /// Stable identity across replug and renumbering. `diskutil list -plist`
+    /// carries VolumeUUID for APFS volumes AND for plain partitions, so this
+    /// costs no extra process launch.
+    ///
+    /// It has to be the volume, not the disk: on the TerraMaster DAS all three
+    /// bays report the same IORegistryEntryName, the same MediaName and the
+    /// same DeviceTreePath, and two of them the same byte size. There is no
+    /// whole-disk serial to key on.
+    public let uuid: String?
     public var isMounted: Bool { mountPoint != nil }
     public var displayName: String { name.trimmingCharacters(in: .whitespaces) }
 }
@@ -192,7 +201,8 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
                 disks[entryDevice]?.directVolumes.append(Volume(
                     device: partitionDevice,
                     name: name ?? "(unnamed)",
-                    mountPoint: mountPoint))
+                    mountPoint: mountPoint,
+                    uuid: (partition["VolumeUUID"] as? String)?.lowercased()))
             }
         }
 
@@ -212,7 +222,8 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
                 volumes.append(Volume(
                     device: volumeDevice,
                     name: volumeEntry["VolumeName"] as? String ?? "(unnamed)",
-                    mountPoint: volumeEntry["MountPoint"] as? String))
+                    mountPoint: volumeEntry["MountPoint"] as? String,
+                    uuid: (volumeEntry["VolumeUUID"] as? String)?.lowercased()))
             }
         }
         disks[physicalDisk]?.containers.append(Container(

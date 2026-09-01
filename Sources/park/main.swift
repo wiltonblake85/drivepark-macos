@@ -27,14 +27,16 @@ func printStatus() {
                 total += 1
                 if volume.isMounted { mounted += 1 }
                 let state = volume.isMounted ? "MOUNTED at \(volume.mountPoint ?? "?")" : "unmounted"
-                print("    volume \"\(volume.name)\" (\(volume.device)) — \(state)")
+                let tag = Preferences.isIgnored(volume.uuid) ? "  [IGNORED, DrivePark leaves this alone]" : ""
+                print("    volume \"\(volume.name)\" (\(volume.device)) — \(state)\(tag)")
             }
         }
         for volume in disk.directVolumes {
             total += 1
             if volume.isMounted { mounted += 1 }
             let state = volume.isMounted ? "MOUNTED at \(volume.mountPoint ?? "?")" : "unmounted"
-            print("    volume \"\(volume.name)\" (\(volume.device), non-APFS) — \(state)")
+            let tag = Preferences.isIgnored(volume.uuid) ? "  [IGNORED, DrivePark leaves this alone]" : ""
+            print("    volume \"\(volume.name)\" (\(volume.device), non-APFS) — \(state)\(tag)")
         }
         print("")
     }
@@ -69,6 +71,12 @@ case "now":
     }
     let outcome = engine.park(onlyDisks: onlyDisks) { print($0) }
     for note in outcome.notes { print(note) }
+    if outcome.parked && !outcome.didWork {
+        // Everything was ignored or already unmounted. This run verified
+        // nothing, so it claims nothing.
+        print("\nNo action taken. Nothing this run manages was mounted.")
+        exit(0)
+    }
     if outcome.parked {
         if onlyDisks == nil {
             print("\nPARKED. All volumes verified unmounted. Safe to power off the enclosure.")
@@ -103,7 +111,46 @@ case "release":
     let (mounted, total) = engine.release(onlyDisks: releaseOnly) { print($0) }
     print("\(mounted) of \(total) external volume(s) mounted.")
     if mounted < total { exit(1) }
+case "ignore", "manage":
+    // park ignore "Plex"   -> never touch it
+    // park manage "Plex"   -> touch it again
+    let wantIgnored = (arguments.first == "ignore")
+    let target = arguments.dropFirst().first
+    guard let target else {
+        print("usage: park \(wantIgnored ? "ignore" : "manage") <volume name or UUID>")
+        exit(64)
+    }
+    let volumes = discoverExternalDisks().flatMap { $0.allVolumes }
+    let match = volumes.first {
+        $0.displayName.caseInsensitiveCompare(target) == .orderedSame
+            || $0.uuid?.caseInsensitiveCompare(target) == .orderedSame
+    }
+    guard let match, let uuid = match.uuid else {
+        print("No external volume matched \"\(target)\".")
+        print("Known: " + volumes.map { $0.displayName }.joined(separator: ", "))
+        exit(1)
+    }
+    Preferences.setIgnored(uuid, wantIgnored)
+    // Verify against a fresh read of the stored set, not the call.
+    let nowIgnored = Preferences.isIgnored(uuid)
+    guard nowIgnored == wantIgnored else {
+        print("Failed to update the ignore list for \"\(match.displayName)\".")
+        exit(2)
+    }
+    print(wantIgnored
+        ? "\"\(match.displayName)\" is now IGNORED. DrivePark will not unmount it, including on Park Tower."
+        : "\"\(match.displayName)\" is managed again.")
+case "ignored":
+    let volumes = discoverExternalDisks().flatMap { $0.allVolumes }
+    let ignored = volumes.filter { Preferences.isIgnored($0.uuid) }
+    if ignored.isEmpty {
+        print("Nothing is ignored. DrivePark manages every external volume.")
+    } else {
+        print("Ignored, never touched by DrivePark:")
+        for volume in ignored { print("  \(volume.displayName)  (\(volume.uuid ?? "?"))") }
+    }
 default:
-    print("usage: park [status | now [--hold] [--only diskN] | release [--only diskN]]")
+    print("usage: park [status | now [--hold] [--only diskN] | release [--only diskN]")
+    print("            | ignore <volume> | manage <volume> | ignored]")
     exit(64)
 }

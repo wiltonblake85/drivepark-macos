@@ -25,7 +25,20 @@ public enum ParkTrigger: String, CaseIterable, Sendable {
 }
 
 public enum Preferences {
-    private static let store = UserDefaults.standard
+    /// One preferences domain for the app AND the CLI.
+    ///
+    /// `UserDefaults.standard` resolves per process: the bundled app gets
+    /// com.wiltonblake.drivepark, the CLI gets a domain named after its own
+    /// executable. Proven on 2026-09-01, when `park ignore T7` wrote to a
+    /// domain called "park", the app never saw it, and the CLI still printed
+    /// "DrivePark will not unmount it." A false assurance about a drive
+    /// mid-copy is the worst bug this project can ship.
+    ///
+    /// suiteName returns nil when it matches the running app's own bundle id,
+    /// which is exactly when `.standard` is already the right store, so the
+    /// fallback lands both processes in the same place.
+    public static let domain = "com.wiltonblake.drivepark"
+    private static let store = UserDefaults(suiteName: domain) ?? .standard
     private static let triggersKey = "enabledTriggers"
     private static let autoReleaseKey = "autoReleaseOnWake"
     private static let wakeDelayKey = "wakeReleaseDelay"
@@ -70,4 +83,33 @@ public enum Preferences {
     /// for more time. macOS allows roughly 30 s; stopping at 20 leaves room to
     /// verify and report before the machine goes down.
     public static let sleepParkBudget: TimeInterval = 20
+
+    // MARK: - The manage list
+
+    private static let ignoredKey = "ignoredVolumeUUIDs"
+
+    /// Volumes DrivePark leaves alone. Nothing automatic touches them, and
+    /// neither does Park Tower. Only naming that drive's own button does.
+    ///
+    /// Keyed on volume UUID because whole disks in a multi-bay enclosure are
+    /// not distinguishable: identical media name, identical device-tree path,
+    /// and sometimes identical size.
+    ///
+    /// This exists because the drive you must never unmount is usually the one
+    /// in use. A media server library mid-stream, an external SSD mid-copy.
+    public static var ignoredVolumeUUIDs: Set<String> {
+        get { Set(store.stringArray(forKey: ignoredKey) ?? []) }
+        set { store.set(newValue.sorted(), forKey: ignoredKey) }
+    }
+
+    public static func isIgnored(_ uuid: String?) -> Bool {
+        guard let uuid else { return false }
+        return ignoredVolumeUUIDs.contains(uuid.lowercased())
+    }
+
+    public static func setIgnored(_ uuid: String, _ on: Bool) {
+        var current = ignoredVolumeUUIDs
+        if on { current.insert(uuid.lowercased()) } else { current.remove(uuid.lowercased()) }
+        ignoredVolumeUUIDs = current
+    }
 }

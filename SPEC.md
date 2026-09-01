@@ -129,6 +129,25 @@ consulted but not copied.
   Improvement surfaced:
   4. Flush stdout after each print (setvbuf/FileHandle) so `--hold` progress
      is visible when stdout is a pipe, not only a terminal.
+- Manage list, and a false assurance (2026-09-01). Volumes DrivePark must
+  never touch, keyed on volume UUID. Disk-level identity is not reachable on
+  this hardware: all three TDAS bays report the same IORegistryEntryName, the
+  same MediaName and the same DeviceTreePath, and two of them the same byte
+  size. There is no whole-disk serial to key on. `diskutil list -plist`
+  already carries VolumeUUID for APFS volumes and for plain partitions, so the
+  key costs no extra process launch and no extra place to hang. Ignored is
+  absolute. Park Tower does not override it, naming the drive does not override
+  it, and a disk carrying a mounted ignored volume is never spun down, because
+  spinning the disk down under that volume breaks the same promise by another
+  route.
+
+  Building it produced a lie of the exact kind this project exists to prevent.
+  `UserDefaults.standard` resolves per process, so `park ignore T7` wrote to a
+  domain named after the CLI executable while the app read its own bundle
+  domain and saw an empty set. The CLI printed "DrivePark will not unmount it"
+  anyway, about a drive that was mid-copy at the time. Both processes now share
+  one explicit suite. The general form is worth keeping: a setting is not saved
+  until the process that acts on it has read it back.
 - Veto ownership (2026-09-01, two defects out of one incident). The menu bar
   app was holding a mount veto over Plex and Backup. It survived a full power
   cycle of the enclosure and refused every remount attempt afterward, which is

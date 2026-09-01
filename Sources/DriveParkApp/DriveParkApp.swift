@@ -35,6 +35,7 @@ final class AppState: ObservableObject {
     @Published var enabledTriggers: Set<ParkTrigger> = Preferences.enabledTriggers
     @Published var autoReleaseOnWake: Bool = Preferences.autoReleaseOnWake
     @Published var launchAtLogin: Bool = LoginItem.isEnabled
+    @Published var ignoredUUIDs: Set<String> = Preferences.ignoredVolumeUUIDs
 
     let engine = Engine()
     private let triggers = TriggerCoordinator()
@@ -50,7 +51,12 @@ final class AppState: ObservableObject {
         }
     }
 
-    var volumes: [Volume] { disks.flatMap { $0.allVolumes } }
+    var allVolumes: [Volume] { disks.flatMap { $0.allVolumes } }
+    /// Only the volumes DrivePark is allowed to act on. An ignored volume must
+    /// not keep the tower reading "not parked" forever, and must not be
+    /// counted as something still to do.
+    var volumes: [Volume] { allVolumes.filter { !Preferences.isIgnored($0.uuid) } }
+    var ignoredVolumes: [Volume] { allVolumes.filter { Preferences.isIgnored($0.uuid) } }
     var mountedCount: Int { volumes.filter { $0.isMounted }.count }
     var isParked: Bool { !volumes.isEmpty && mountedCount == 0 }
 
@@ -62,7 +68,8 @@ final class AppState: ObservableObject {
     }
 
     var statusLine: String {
-        if volumes.isEmpty { return "No external disks found" }
+        if allVolumes.isEmpty { return "No external disks found" }
+        if volumes.isEmpty { return "Every external volume is on the ignore list" }
         if enclosureStalled { return "Enclosure not fully answering" }
         if isParked { return "Parked, safe to power off" }
         return "\(mountedCount) of \(volumes.count) volumes mounted"
@@ -171,6 +178,9 @@ final class AppState: ObservableObject {
 
     private static func describe(_ outcome: ParkOutcome, label: String?,
                                  trigger: String?) -> String {
+        if outcome.parked && !outcome.didWork {
+            return "No action taken. Nothing this run manages was mounted."
+        }
         if outcome.parked {
             if let label { return "\(label) parked." }
             if let trigger { return "Parked because \(trigger). Safe to power off." }
@@ -192,6 +202,19 @@ final class AppState: ObservableObject {
     func setAutoRelease(_ on: Bool) {
         Preferences.autoReleaseOnWake = on
         autoReleaseOnWake = on
+    }
+
+    func setIgnored(_ volume: Volume, _ on: Bool) {
+        guard let uuid = volume.uuid else {
+            message = "\(volume.displayName) has no volume UUID, so it cannot be tracked across replugs."
+            return
+        }
+        Preferences.setIgnored(uuid, on)
+        ignoredUUIDs = Preferences.ignoredVolumeUUIDs
+        message = on
+            ? "\(volume.displayName) is ignored. DrivePark will not unmount it."
+            : "\(volume.displayName) is managed again."
+        objectWillChange.send()
     }
 
     func setLaunchAtLogin(_ on: Bool) {
@@ -224,16 +247,21 @@ struct MenuContent: View {
         }
         Divider()
         ForEach(state.disks, id: \.device) { disk in
-            let mountedHere = disk.allVolumes.contains { $0.isMounted }
+            let actionable = disk.allVolumes.filter { !Preferences.isIgnored($0.uuid) }
+            let mountedHere = actionable.contains { $0.isMounted }
             let label = disk.allVolumes.map { $0.displayName }.joined(separator: ", ")
-            Button(mountedHere ? "Park \(label)" : "Release \(label)") {
-                if mountedHere {
-                    state.park(only: [disk.device], label: label)
-                } else {
-                    state.release(only: [disk.device], label: label)
+            if actionable.isEmpty {
+                Text("\(label) — ignored")
+            } else {
+                Button(mountedHere ? "Park \(label)" : "Release \(label)") {
+                    if mountedHere {
+                        state.park(only: [disk.device], label: label)
+                    } else {
+                        state.release(only: [disk.device], label: label)
+                    }
                 }
+                .disabled(state.busy)
             }
-            .disabled(state.busy || disk.allVolumes.isEmpty)
         }
         Divider()
         Button(state.busy ? "Working…" : "Park Tower") {
@@ -246,6 +274,17 @@ struct MenuContent: View {
         .disabled(state.busy || state.volumes.isEmpty || state.mountedCount == state.volumes.count)
 
         Divider()
+        Menu("Drives") {
+            Text("Unchecked drives are never touched, including by Park Tower")
+            Divider()
+            ForEach(state.allVolumes, id: \.device) { volume in
+                Toggle(volume.displayName.isEmpty ? volume.device : volume.displayName,
+                       isOn: Binding(
+                        get: { !Preferences.isIgnored(volume.uuid) },
+                        set: { state.setIgnored(volume, !$0) }))
+                    .disabled(volume.uuid == nil)
+            }
+        }
         Menu("Automation") {
             ForEach(ParkTrigger.allCases, id: \.self) { trigger in
                 Toggle(trigger.label, isOn: Binding(

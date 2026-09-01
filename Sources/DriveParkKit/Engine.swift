@@ -12,7 +12,16 @@ public struct ParkOutcome {
     public let results: [VolumeParkResult]
     public let stillMounted: [Volume]
     public let notes: [String]
+    /// True when nothing DrivePark manages is left mounted.
+    ///
+    /// Not the same as "this run parked something". A run that unmounted
+    /// nothing, because every volume was ignored or already unmounted, also
+    /// satisfies this, and calling that a park is how a tool ends up printing
+    /// "Nothing to park" and "PARKED" one line apart. Ask `didWork` too.
     public var parked: Bool { stillMounted.isEmpty }
+
+    /// True when this run actually unmounted something and verified it.
+    public var didWork: Bool { !results.isEmpty }
 
     public var blockerSummary: String? {
         let failed = results.filter { !$0.success && !$0.blockers.isEmpty }
@@ -53,10 +62,19 @@ public final class Engine {
         }
         let disks = discoverExternalDisks()
             .filter { onlyDisks?.contains($0.device) ?? true }
+
+        // The ignore list is absolute. Not overridden by naming the drive, not
+        // overridden by Park Tower. A volume you told DrivePark to leave alone
+        // is one it must not unmount while something is mid-copy on it, and an
+        // override that one click can reach is not a guarantee.
+        var skipped: [Volume] = []
         var vetoUUIDs: Set<String> = []
         for disk in disks {
             for volume in disk.allVolumes {
-                if let uuid = volumeUUID(of: volume.device) {
+                guard let uuid = volume.uuid else { continue }
+                if Preferences.isIgnored(uuid) {
+                    skipped.append(volume)
+                } else {
                     vetoUUIDs.insert(uuid.lowercased())
                 }
             }
@@ -64,7 +82,8 @@ public final class Engine {
 
         var results: [VolumeParkResult] = []
         for disk in disks {
-            for volume in disk.allVolumes where volume.isMounted {
+            for volume in disk.allVolumes
+            where volume.isMounted && !Preferences.isIgnored(volume.uuid) {
                     var success = false
                     var blockers: [String] = []
                     var ranOutOfTime = false
@@ -109,13 +128,25 @@ public final class Engine {
         // VERIFY with a fresh read. Never trust the callbacks alone.
         let after = discoverExternalDisks()
             .filter { onlyDisks?.contains($0.device) ?? true }
-        let stillMounted = after.flatMap { $0.allVolumes }.filter { $0.isMounted }
+        let stillMounted = after.flatMap { $0.allVolumes }
+            .filter { $0.isMounted && !Preferences.isIgnored($0.uuid) }
 
-        // Courtesy spin-down for each fully-unmounted physical disk.
         var notes: [String] = []
+        for volume in skipped {
+            notes.append("\(volume.displayName): left alone, on the ignore list")
+        }
+
+        // Courtesy spin-down, but never for a disk carrying a mounted volume
+        // we were told to leave alone. Spinning down the disk under an ignored
+        // volume would break exactly the promise the ignore list makes.
         for disk in after {
             let anyMounted = disk.allVolumes.contains { $0.isMounted }
-            guard !anyMounted else { continue }
+            guard !anyMounted else {
+                if disk.allVolumes.contains(where: { $0.isMounted && Preferences.isIgnored($0.uuid) }) {
+                    notes.append("\(disk.device): left spinning, it carries an ignored volume that is still mounted")
+                }
+                continue
+            }
             let result = ops.eject(diskBSDName: disk.device)
             let attached = ops.isAttached(diskBSDName: disk.device)
             if result.success && attached {
@@ -129,7 +160,16 @@ public final class Engine {
 
         // Arm the remount veto only after a fully verified park. Union, so
         // per-drive parks accumulate instead of replacing each other.
-        if stillMounted.isEmpty { parkedVolumeUUIDs.formUnion(vetoUUIDs) }
+        //
+        // `results` being empty means this run unmounted nothing, so there is
+        // nothing it verified and nothing to stand behind. Arming on that
+        // turned a stray park against already-unmounted drives into a standing
+        // veto nobody asked for, and nothing on screen said so.
+        if stillMounted.isEmpty && !results.isEmpty {
+            parkedVolumeUUIDs.formUnion(vetoUUIDs)
+        } else if stillMounted.isEmpty && results.isEmpty {
+            notes.append("Nothing to park: no managed volume was mounted. Veto left as it was.")
+        }
         return ParkOutcome(results: results, stillMounted: stillMounted, notes: notes)
     }
 
@@ -144,14 +184,15 @@ public final class Engine {
         } else {
             for disk in disks {
                 for volume in disk.allVolumes {
-                    if let uuid = volumeUUID(of: volume.device) {
+                    if let uuid = volume.uuid {
                         parkedVolumeUUIDs.remove(uuid.lowercased())
                     }
                 }
             }
         }
         for disk in disks {
-            for volume in disk.allVolumes where !volume.isMounted {
+            for volume in disk.allVolumes
+            where !volume.isMounted && !Preferences.isIgnored(volume.uuid) {
                 progress("Mounting \(volume.displayName)")
                 let result = ops.mount(volumeBSDName: volume.device)
                 if !result.success {
@@ -163,6 +204,7 @@ public final class Engine {
         let after = discoverExternalDisks()
             .filter { onlyDisks?.contains($0.device) ?? true }
             .flatMap { $0.allVolumes }
+            .filter { !Preferences.isIgnored($0.uuid) }
         return (after.filter { $0.isMounted }.count, after.count)
     }
 }
