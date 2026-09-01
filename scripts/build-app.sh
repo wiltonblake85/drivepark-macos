@@ -20,6 +20,10 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp .build/release/DriveParkApp "$APP/Contents/MacOS/DrivePark"
 cp scripts/Info.plist "$APP/Contents/Info.plist"
+mkdir -p "$APP/Contents/Resources"
+# Classic four-byte type/creator file. Xcode still writes it, and some
+# subsystems that inspect bundles predate reading Info.plist alone.
+printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 # Override with DRIVEPARK_SIGN_IDENTITY if you need a specific certificate.
 IDENTITY="${DRIVEPARK_SIGN_IDENTITY:-}"

@@ -129,6 +129,29 @@ consulted but not copied.
   Improvement surfaced:
   4. Flush stdout after each print (setvbuf/FileHandle) so `--hold` progress
      is visible when stdout is a pipe, not only a terminal.
+- Notifications refused at registration (2026-09-01, OPEN).
+  UNUserNotificationCenter reports authorizationStatus denied with
+  "Notifications are not allowed for this application", and no prompt is ever
+  shown. The app never appears in ncprefs at all, so macOS refuses before any
+  of our code runs. Chimes are unaffected, because NSSound carries no such
+  requirement, and that is the only reason the undock signal survives this.
+
+  Ruled out by test rather than by reasoning, each one its own build and
+  relaunch. Ad-hoc signing: re-signed with Developer ID, hardened runtime,
+  timestamped, still denied. A stale daemon: usernoted killed and restarted,
+  still denied. Install location: run from /Applications rather than the home
+  folder, still denied. Notarization: submitted, Accepted by Apple, ticket
+  stapled, installed by mounting the disk image and copying across the way a
+  buyer would, still denied. An incomplete bundle: NSPrincipalClass, PkgInfo,
+  a Resources directory, CFBundleInfoDictionaryVersion and the other keys
+  Xcode always writes, all added, still denied.
+
+  Untested and worth a fresh look. Whether LSUIElement is the blocker, though
+  many menu bar apps post notifications happily. Whether this is macOS 27
+  behaviour on build 26A5406e rather than anything about this app, which is
+  the one hypothesis nothing here can rule out from inside. The diagnostics
+  that produced every answer above live in the app and read back with
+  `defaults read com.wiltonblake.drivepark`.
 - Global shortcut (2026-09-01, passed on hardware). Control Option Command P
   registered through Carbon RegisterEventHotKey with no Accessibility
   permission requested, fired from outside the app, and toggled correctly in

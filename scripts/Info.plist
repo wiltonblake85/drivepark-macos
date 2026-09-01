@@ -9,6 +9,14 @@
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleSignature</key><string>????</string>
+    <!-- Without NSPrincipalClass the bundle is not fully an AppKit
+         application to every subsystem that inspects it. Xcode always writes
+         this; a hand-rolled bundle has to do it deliberately. -->
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHumanReadableCopyright</key><string>© 2026 Wekesa Blake</string>
