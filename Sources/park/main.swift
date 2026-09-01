@@ -71,6 +71,12 @@ case "now":
     }
     let outcome = engine.park(onlyDisks: onlyDisks) { print($0) }
     for note in outcome.notes { print(note) }
+    for result in outcome.results {
+        let verdict = result.success ? "unmounted" : "FAILED"
+        print(String(format: "  %@: %@ in %.2fs, %d attempt(s)",
+                     result.volume.displayName, verdict, result.duration, result.attempts))
+    }
+    if outcome.didWork { print("Timing: " + outcome.timing.summary) }
     if outcome.parked && !outcome.didWork {
         // Everything was ignored or already unmounted. This run verified
         // nothing, so it claims nothing.

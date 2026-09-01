@@ -6,12 +6,33 @@ public struct VolumeParkResult {
     public let volume: Volume
     public let success: Bool
     public let blockers: [String]
+    /// Wall-clock time spent on this volume, retry waits included.
+    public let duration: TimeInterval
+    /// How many solicitations it took. More than one means macOS refused at
+    /// least once, which is the interesting case.
+    public let attempts: Int
+}
+
+/// Where the wall-clock went. Reported rather than estimated, because the
+/// whole point of this tool is that it does not guess about its own behaviour.
+public struct ParkTiming {
+    public var discover: TimeInterval = 0
+    public var unmount: TimeInterval = 0
+    public var verify: TimeInterval = 0
+    public var spinDown: TimeInterval = 0
+    public var total: TimeInterval = 0
+
+    public var summary: String {
+        String(format: "%.2fs total (discover %.2f, unmount %.2f, verify %.2f, spin-down %.2f)",
+               total, discover, unmount, verify, spinDown)
+    }
 }
 
 public struct ParkOutcome {
     public let results: [VolumeParkResult]
     public let stillMounted: [Volume]
     public let notes: [String]
+    public var timing = ParkTiming()
     /// True when nothing DrivePark manages is left mounted.
     ///
     /// Not the same as "this run parked something". A run that unmounted
@@ -60,8 +81,12 @@ public final class Engine {
             return ParkOutcome(results: [], stillMounted: [],
                                notes: ["Disk Arbitration session unavailable"])
         }
+        let started = Date()
+        var timing = ParkTiming()
+        let discoverStarted = Date()
         let disks = discoverExternalDisks()
             .filter { onlyDisks?.contains($0.device) ?? true }
+        timing.discover = Date().timeIntervalSince(discoverStarted)
 
         // The ignore list is absolute. Not overridden by naming the drive, not
         // overridden by Park Tower. A volume you told DrivePark to leave alone
@@ -81,12 +106,15 @@ public final class Engine {
         }
 
         var results: [VolumeParkResult] = []
+        let unmountStarted = Date()
         for disk in disks {
             for volume in disk.allVolumes
             where volume.isMounted && !Preferences.isIgnored(volume.uuid) {
                     var success = false
                     var blockers: [String] = []
                     var ranOutOfTime = false
+                    let volumeStarted = Date()
+                    var usedAttempts = 0
                     for (attempt, delay) in Self.retryDelays.enumerated() {
                         if let deadline, Date() >= deadline {
                             ranOutOfTime = true
@@ -108,6 +136,7 @@ public final class Engine {
                             }
                         }
                         progress("Unmounting \(volume.displayName), attempt \(attempt + 1)/\(Self.retryDelays.count)")
+                        usedAttempts = attempt + 1
                         let result = ops.unmount(volumeBSDName: volume.device)
                         if result.success { success = true; break }
                         if let mountPoint = volume.mountPoint {
@@ -121,21 +150,30 @@ public final class Engine {
                     if ranOutOfTime && blockers.isEmpty {
                         blockers = ["ran out of time before macOS forced sleep"]
                     }
-                results.append(VolumeParkResult(volume: volume, success: success, blockers: blockers))
+                results.append(VolumeParkResult(
+                    volume: volume, success: success, blockers: blockers,
+                    duration: Date().timeIntervalSince(volumeStarted),
+                    attempts: usedAttempts))
             }
         }
 
+        timing.unmount = Date().timeIntervalSince(unmountStarted)
+
         // VERIFY with a fresh read. Never trust the callbacks alone.
+        let verifyStarted = Date()
         let after = discoverExternalDisks()
             .filter { onlyDisks?.contains($0.device) ?? true }
         let stillMounted = after.flatMap { $0.allVolumes }
             .filter { $0.isMounted && !Preferences.isIgnored($0.uuid) }
+
+        timing.verify = Date().timeIntervalSince(verifyStarted)
 
         var notes: [String] = []
         for volume in skipped {
             notes.append("\(volume.displayName): left alone, on the ignore list")
         }
 
+        let spinStarted = Date()
         // Courtesy spin-down, but never for a disk carrying a mounted volume
         // we were told to leave alone. Spinning down the disk under an ignored
         // volume would break exactly the promise the ignore list makes.
@@ -165,12 +203,16 @@ public final class Engine {
         // nothing it verified and nothing to stand behind. Arming on that
         // turned a stray park against already-unmounted drives into a standing
         // veto nobody asked for, and nothing on screen said so.
+        timing.spinDown = Date().timeIntervalSince(spinStarted)
+        timing.total = Date().timeIntervalSince(started)
+
         if stillMounted.isEmpty && !results.isEmpty {
             parkedVolumeUUIDs.formUnion(vetoUUIDs)
         } else if stillMounted.isEmpty && results.isEmpty {
             notes.append("Nothing to park: no managed volume was mounted. Veto left as it was.")
         }
-        return ParkOutcome(results: results, stillMounted: stillMounted, notes: notes)
+        return ParkOutcome(results: results, stillMounted: stillMounted,
+                           notes: notes, timing: timing)
     }
 
     public func release(onlyDisks: Set<String>? = nil,

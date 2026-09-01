@@ -129,6 +129,26 @@ consulted but not copied.
   Improvement surfaced:
   4. Flush stdout after each print (setvbuf/FileHandle) so `--hold` progress
      is visible when stdout is a pipe, not only a terminal.
+- Park timing, measured (2026-09-01). Six scoped parks across two TDAS bays,
+  each followed by a release. Unmount durations in order: 11.26, 0.59, 0.79,
+  0.51, 0.91, 10.83 seconds. Median sits under a second, and end to end a park
+  runs about two seconds including discovery and the verify re-read.
+
+  The distribution is bimodal rather than an average with noise around it. Four
+  runs finished under a second, two took roughly eleven, and nothing in
+  between. Both slow runs completed on a single solicitation instead of
+  climbing the retry ladder, so the Disk Arbitration unmount call itself
+  blocked for eleven seconds, and neither named a blocking process. The eleven
+  seconds in the founding diagnostic came from three solicitations spread over
+  a similar span, which is a different mechanism landing on the same number.
+  What imposes the eleven is not yet known and is worth chasing.
+
+  For the sleep path the tail matters and the median does not. Three volumes
+  each drawing the slow case is thirty-three seconds against a twenty second
+  budget, inside a macOS grace window of roughly thirty, so a sleep-triggered
+  park of a full enclosure can genuinely run out of time. That is what the
+  deadline is for. The report then has to say two of three parked and name the
+  one it did not reach.
 - Manage list, and a false assurance (2026-09-01). Volumes DrivePark must
   never touch, keyed on volume UUID. Disk-level identity is not reachable on
   this hardware: all three TDAS bays report the same IORegistryEntryName, the
