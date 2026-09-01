@@ -84,6 +84,18 @@ public enum Preferences {
     /// verify and report before the machine goes down.
     public static let sleepParkBudget: TimeInterval = 20
 
+    /// Diagnostics the app records about itself, readable with
+    /// `defaults read com.wiltonblake.drivepark`.
+    ///
+    /// Goes through `store` on purpose. Re-deriving the store with
+    /// UserDefaults(suiteName:) returns nil inside the app, because the name
+    /// is its own bundle id, and every write then vanishes without error.
+    /// That mistake has now been made twice in one day, so there is exactly
+    /// one store and this is the only way to write to it.
+    public static func recordDiagnostic(_ key: String, _ value: String) {
+        store.set(value, forKey: "diag_\(key)")
+    }
+
     /// Global shortcut on or off. Default on: a hotkey nobody knows about is
     /// the same as no hotkey, and the menu shows the combination next to the
     /// action so it is discoverable rather than folklore.

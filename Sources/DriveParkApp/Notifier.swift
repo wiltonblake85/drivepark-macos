@@ -11,6 +11,7 @@
 import Foundation
 import AppKit
 import UserNotifications
+import DriveParkKit
 
 @MainActor
 final class Notifier {
@@ -28,11 +29,43 @@ final class Notifier {
         return UNUserNotificationCenter.current()
     }
 
+    /// Writes what actually happened into the shared preferences domain.
+    ///
+    /// A failure that only shows in a menu is a failure nobody can debug: the
+    /// menu cannot be read from a script, from a log, or by anyone helping
+    /// remotely. This is the seed of the diagnostics report on the roadmap.
+    private func record(_ key: String, _ value: String) {
+        Preferences.recordDiagnostic(key, value)
+    }
+
+    func readBackSettings() {
+        guard let center else { return }
+        center.getNotificationSettings { settings in
+            Task { @MainActor in
+                let status: String
+                switch settings.authorizationStatus {
+                case .notDetermined: status = "notDetermined"
+                case .denied: status = "denied"
+                case .authorized: status = "authorized"
+                case .provisional: status = "provisional"
+                case .ephemeral: status = "ephemeral"
+                @unknown default: status = "unknown"
+                }
+                self.record("authStatus", status)
+                self.record("alertSetting", "\(settings.alertSetting.rawValue)")
+                self.record("notificationCenterSetting", "\(settings.notificationCenterSetting.rawValue)")
+            }
+        }
+    }
+
     func requestAuthorizationIfNeeded() {
         guard !asked else { return }
         asked = true
+        record("bundleID", Bundle.main.bundleIdentifier ?? "nil")
+        record("bundlePath", Bundle.main.bundlePath)
         guard let center else {
             failure = "Not running as a bundled app, so notifications are unavailable."
+            record("requestOutcome", "no bundle identifier")
             return
         }
         center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
@@ -41,11 +74,15 @@ final class Notifier {
                 self.authorized = granted
                 if let error {
                     self.failure = "Notifications unavailable: \(error.localizedDescription)"
+                    self.record("requestOutcome", "error: \(error.localizedDescription)")
                 } else if granted {
                     self.failure = nil
+                    self.record("requestOutcome", "granted")
                 } else {
                     self.failure = "Notifications are off for DrivePark in System Settings."
+                    self.record("requestOutcome", "denied")
                 }
+                self.readBackSettings()
             }
         }
     }
@@ -59,9 +96,14 @@ final class Notifier {
         let request = UNNotificationRequest(identifier: UUID().uuidString,
                                             content: content, trigger: nil)
         center.add(request) { [weak self] error in
-            guard let error else { return }
             Task { @MainActor in
-                self?.failure = "Notification failed: \(error.localizedDescription)"
+                guard let self else { return }
+                if let error {
+                    self.failure = "Notification failed: \(error.localizedDescription)"
+                    self.record("lastPost", "error: \(error.localizedDescription)")
+                } else {
+                    self.record("lastPost", "accepted: \(title)")
+                }
             }
         }
     }
