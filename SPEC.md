@@ -129,6 +129,35 @@ consulted but not copied.
   Improvement surfaced:
   4. Flush stdout after each print (setvbuf/FileHandle) so `--hold` progress
      is visible when stdout is a pipe, not only a terminal.
+- Veto ownership (2026-09-01, two defects out of one incident). The menu bar
+  app was holding a mount veto over Plex and Backup. It survived a full power
+  cycle of the enclosure and refused every remount attempt afterward, which is
+  the standing-park-rule differentiator working correctly on real hardware, and
+  it is also how the two defects surfaced. Killing the app cleared it and both
+  volumes mounted on the next attempt. Scope note, because the first draft of
+  this entry overreached: Bottom Drawer was never part of the test, so nothing
+  here establishes whether the veto covered it. Wekesa mounted that one
+  himself.
+  1. `park release` cannot clear a veto the app holds. `parkedVolumeUUIDs`
+     lives in process memory, so the CLI clears its own empty copy, reports the
+     app's dissent string back to the user, and stops there. No remedy short of
+     quitting the app. Telling the truth and offering no way out is half a
+     product. The CLI needs to reach the app, or at minimum name the app as the
+     holder and point at the menu.
+  2. A park that unmounts nothing still arms the veto. After a run that
+     verified three unmounts, `stillMounted.isEmpty` is true. When nothing was
+     mounted in the first place it is true as well, and the code has no way to
+     tell those two events apart, so a stray park against already-unmounted
+     drives arms a standing veto over them and says nothing about it. Parked
+     has to mean this run verified these volumes unmounted.
+- Attributing a state change to your own fix (2026-09-01, the reasoning error
+  behind the entry above). That draft claimed all three volumes mounted on
+  their own once the veto died, and leaned on Bottom Drawer as the proof.
+  Bottom Drawer was never in the experiment. A person unparked it by hand while
+  the session was reading status. A fresh read tells you what is true and never
+  tells you who did it, so an isolation test covers exactly what it toggled and
+  nothing else, and on a machine with someone sitting at it that gap is where
+  false causes get written down.
 - Sleep acknowledgement, a v0.2 design rule. kIOMessageSystemWillSleep holds
   sleep open until IOAllowPowerChange answers, and macOS waits roughly 30 s
   before it stops caring. The retry ladder alone can burn 17 s in sleeps before
