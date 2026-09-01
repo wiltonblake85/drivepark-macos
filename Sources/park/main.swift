@@ -146,6 +146,24 @@ case "ignore", "manage":
     print(wantIgnored
         ? "\"\(match.displayName)\" is now IGNORED. DrivePark will not unmount it, including on Park Tower."
         : "\"\(match.displayName)\" is managed again.")
+case "triggers":
+    print("AUTOMATIC PARKING\n")
+    for status in TriggerHealth.allStatuses() {
+        let armed = Preferences.isEnabled(status.trigger) ? "ARMED " : "off   "
+        let health = status.canFire ? "" : "  <- CANNOT FIRE"
+        print("\(armed) \(status.trigger.label)\(health)")
+        if let reason = status.reason { print("        \(reason)") }
+    }
+    let dead = TriggerHealth.armedButDead()
+    print("")
+    if dead.isEmpty {
+        print("Every armed trigger can fire.")
+    } else {
+        print("WARNING: \(dead.count) armed trigger(s) cannot fire on this Mac right now.")
+        print("They are switched on and they will never run. That is not a")
+        print("setting problem, it is the machine's current power state.")
+        exit(1)
+    }
 case "ignored":
     let volumes = discoverExternalDisks().flatMap { $0.allVolumes }
     let ignored = volumes.filter { Preferences.isIgnored($0.uuid) }
@@ -157,6 +175,6 @@ case "ignored":
     }
 default:
     print("usage: park [status | now [--hold] [--only diskN] | release [--only diskN]")
-    print("            | ignore <volume> | manage <volume> | ignored]")
+    print("            | ignore <volume> | manage <volume> | ignored | triggers]")
     exit(64)
 }

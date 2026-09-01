@@ -40,6 +40,8 @@ final class AppState: ObservableObject {
     /// unmount time is bimodal, half a second or eleven, so a countdown would
     /// be wrong a third of the time and you would learn to distrust it.
     @Published var hotKeyEnabled: Bool = Preferences.hotKeyEnabled
+    /// Armed triggers that cannot currently fire, keyed by trigger.
+    @Published var triggerWarnings: [ParkTrigger: String] = [:]
     @Published var workingSince: Date?
     @Published var workingOn: String = ""
     private var tickTimer: Timer?
@@ -79,6 +81,9 @@ final class AppState: ObservableObject {
     var statusLine: String {
         if allVolumes.isEmpty { return "No external disks found" }
         if volumes.isEmpty { return "Every external volume is on the ignore list" }
+        if !triggerWarnings.isEmpty {
+            return "\(triggerWarnings.count) armed trigger(s) cannot fire"
+        }
         if enclosureStalled { return "Enclosure not fully answering" }
         if isParked { return "Parked, safe to power off" }
         return "\(mountedCount) of \(volumes.count) volumes mounted"
@@ -113,6 +118,11 @@ final class AppState: ObservableObject {
                 self.lastVerifiedAt = Date()
                 self.enclosureStalled = stalled
                 self.refreshing = false
+                var warnings: [ParkTrigger: String] = [:]
+                for status in TriggerHealth.armedButDead() {
+                    warnings[status.trigger] = status.reason
+                }
+                self.triggerWarnings = warnings
                 if stalled, self.message.isEmpty || self.message.hasPrefix("Enclosure") {
                     self.message = "Enclosure not answering detail queries. Volume state is still accurate."
                 }
@@ -284,6 +294,15 @@ final class AppState: ObservableObject {
     func setTrigger(_ trigger: ParkTrigger, _ on: Bool) {
         Preferences.setEnabled(trigger, on)
         enabledTriggers = Preferences.enabledTriggers
+        let status = TriggerHealth.status(for: trigger)
+        if on, !status.canFire, let reason = status.reason {
+            // Say it at the moment they switch it on, not only in a submenu
+            // they may never open again.
+            message = reason
+            triggerWarnings[trigger] = reason
+        } else {
+            triggerWarnings[trigger] = nil
+        }
     }
 
     func setAutoRelease(_ on: Bool) {
@@ -424,6 +443,11 @@ struct MenuContent: View {
                 Toggle(trigger.label, isOn: Binding(
                     get: { state.enabledTriggers.contains(trigger) },
                     set: { state.setTrigger(trigger, $0) }))
+                // The honest bit. A ticked box that cannot fire says so here,
+                // instead of letting you believe you are covered.
+                if let reason = state.triggerWarnings[trigger] {
+                    Text("⚠︎ \(reason)")
+                }
             }
             Divider()
             Toggle("Remount automatically on wake", isOn: Binding(
