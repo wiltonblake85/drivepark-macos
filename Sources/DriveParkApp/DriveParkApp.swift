@@ -42,6 +42,10 @@ final class AppState: ObservableObject {
     @Published var hotKeyEnabled: Bool = Preferences.hotKeyEnabled
     /// Armed triggers that cannot currently fire, keyed by trigger.
     @Published var triggerWarnings: [ParkTrigger: String] = [:]
+    /// Volumes the last park could not unmount, and who was holding them.
+    /// Force is offered from here and nowhere else, so it can never be reached
+    /// without a failure having already happened and been explained.
+    @Published var lastBlocked: [VolumeParkResult] = []
     @Published var workingSince: Date?
     @Published var workingOn: String = ""
     private var tickTimer: Timer?
@@ -134,6 +138,31 @@ final class AppState: ObservableObject {
 
     func triggersNoteManualPark() { triggers.noteManualPark() }
 
+    /// Offered only after a manual park failed. Confirmed by a modal that
+    /// names what is lost, then run once with no retries.
+    func forceUnmountBlocked() {
+        guard !busy, !lastBlocked.isEmpty else { return }
+        let names = lastBlocked.map { $0.volume.displayName }
+        let blockers = Array(Set(lastBlocked.flatMap { $0.blockers })).sorted()
+        guard ForcePrompt.confirm(volumes: names, blockers: blockers) else {
+            message = "Left alone. Nothing was forced."
+            return
+        }
+        let disks = Set(lastBlocked.compactMap { volume -> String? in
+            self.disks.first { $0.allVolumes.contains { $0.device == volume.volume.device } }?.device
+        })
+        triggers.noteManualPark()
+        lastBlocked = []
+        runPark(only: disks.isEmpty ? nil : disks, deadline: nil,
+                label: nil, force: true, completion: nil)
+    }
+
+    var forceOfferLine: String? {
+        guard !lastBlocked.isEmpty else { return nil }
+        let names = lastBlocked.map { $0.volume.displayName }.joined(separator: ", ")
+        return "Force unmount \(names)…"
+    }
+
     func park(only: Set<String>? = nil, label: String? = nil) {
         triggers.noteManualPark()
         runPark(only: only, deadline: nil, label: label, completion: nil)
@@ -179,6 +208,7 @@ final class AppState: ObservableObject {
     }
 
     private func runPark(only: Set<String>?, deadline: Date?, label: String?,
+                         force: Bool = false,
                          triggerLabel: String? = nil,
                          completion: ((ParkOutcome?) -> Void)?) {
         guard !busy else {
@@ -188,12 +218,14 @@ final class AppState: ObservableObject {
             return
         }
         busy = true
-        message = triggerLabel.map { "Parking because \($0)…" } ?? "Parking…"
+        message = force
+            ? "Forcing…"
+            : (triggerLabel.map { "Parking because \($0)…" } ?? "Parking…")
         startTicking()
         let engine = self.engine
         let before = volumes
         Task.detached {
-            let outcome = engine.park(onlyDisks: only, deadline: deadline) { line in
+            let outcome = engine.park(onlyDisks: only, deadline: deadline, force: force) { line in
                 Task { @MainActor in self.workingOn = line }
             }
             let found = engine.discover()
@@ -204,6 +236,12 @@ final class AppState: ObservableObject {
                 self.busy = false
                 self.stopTicking()
                 self.message = Self.describe(outcome, label: label, trigger: triggerLabel)
+                // Trigger-driven parks never leave a force offer behind. A
+                // failure you did not watch happen is not a mandate to do
+                // something destructive later.
+                self.lastBlocked = (triggerLabel == nil && !outcome.parked)
+                    ? outcome.results.filter { !$0.success }
+                    : []
                 self.notify(outcome, scoped: only != nil, before: before)
             }
             completion?(outcome)
@@ -426,6 +464,11 @@ struct MenuContent: View {
         }
         .disabled(state.busy || state.volumes.isEmpty || state.mountedCount == state.volumes.count)
 
+        if let offer = state.forceOfferLine {
+            Divider()
+            Button(offer) { state.forceUnmountBlocked() }
+                .disabled(state.busy)
+        }
         Divider()
         Menu("Drives") {
             Text("Unchecked drives are never touched, including by Park Tower")

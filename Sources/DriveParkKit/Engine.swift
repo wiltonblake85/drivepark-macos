@@ -74,8 +74,15 @@ public final class Engine {
     ///   kIOMessageSystemWillSleep and a forced sleep, and the full ladder can
     ///   outlast it. A park cut short by the deadline reports what it reached,
     ///   it does not claim more.
+    /// - Parameter force: tears the filesystem down even with files open.
+    ///   Unwritten data in those files is lost. Never defaulted, never
+    ///   persisted, and never reachable from a trigger: a screen lock that
+    ///   force-unmounts a drive mid-write would be the worst thing this app
+    ///   could do. It exists as a one-shot remedy a human asks for by name,
+    ///   after a normal park has already failed and named the blocker.
     public func park(onlyDisks: Set<String>? = nil,
                      deadline: Date? = nil,
+                     force: Bool = false,
                      progress: (String) -> Void = { _ in }) -> ParkOutcome {
         guard let ops else {
             return ParkOutcome(results: [], stillMounted: [],
@@ -105,6 +112,11 @@ public final class Engine {
             }
         }
 
+        // Force does not climb the retry ladder. The ladder exists to wait a
+        // blocker out; force refuses to wait, so retrying it is just repeating
+        // the same violence.
+        let ladder = force ? [TimeInterval(0)] : Self.retryDelays
+
         var results: [VolumeParkResult] = []
         let unmountStarted = Date()
         for disk in disks {
@@ -115,7 +127,7 @@ public final class Engine {
                     var ranOutOfTime = false
                     let volumeStarted = Date()
                     var usedAttempts = 0
-                    for (attempt, delay) in Self.retryDelays.enumerated() {
+                    for (attempt, delay) in ladder.enumerated() {
                         if let deadline, Date() >= deadline {
                             ranOutOfTime = true
                             progress("\(volume.displayName): out of time before attempt \(attempt + 1)")
@@ -135,9 +147,12 @@ public final class Engine {
                                 Thread.sleep(forTimeInterval: delay)
                             }
                         }
-                        progress("Unmounting \(volume.displayName), attempt \(attempt + 1)/\(Self.retryDelays.count)")
+                        progress("Unmounting \(volume.displayName), attempt \(attempt + 1)/\(ladder.count)")
                         usedAttempts = attempt + 1
-                        let result = ops.unmount(volumeBSDName: volume.device)
+                        if force {
+                            progress("Forcing \(volume.displayName) unmounted, open files will lose unwritten data")
+                        }
+                        let result = ops.unmount(volumeBSDName: volume.device, force: force)
                         if result.success { success = true; break }
                         if let mountPoint = volume.mountPoint {
                             let found = lsofBlockers(mountPoint: mountPoint)

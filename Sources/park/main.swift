@@ -69,7 +69,12 @@ case "now":
         let valueIndex = arguments.index(after: flagIndex)
         if arguments.indices.contains(valueIndex) { onlyDisks = [arguments[valueIndex]] }
     }
-    let outcome = engine.park(onlyDisks: onlyDisks) { print($0) }
+    let force = arguments.contains("--force")
+    if force {
+        print("FORCE: open files will be torn down and unwritten data in them is lost.")
+        print("No retries, no waiting for the blocker to finish.\n")
+    }
+    let outcome = engine.park(onlyDisks: onlyDisks, force: force) { print($0) }
     for note in outcome.notes { print(note) }
     for result in outcome.results {
         let verdict = result.success ? "unmounted" : "FAILED"
@@ -174,7 +179,7 @@ case "ignored":
         for volume in ignored { print("  \(volume.displayName)  (\(volume.uuid ?? "?"))") }
     }
 default:
-    print("usage: park [status | now [--hold] [--only diskN] | release [--only diskN]")
+    print("usage: park [status | now [--hold] [--force] [--only diskN] | release [--only diskN]")
     print("            | ignore <volume> | manage <volume> | ignored | triggers]")
     exit(64)
 }
