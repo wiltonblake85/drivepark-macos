@@ -225,6 +225,7 @@ final class AppState: ObservableObject {
             var body = "Still mounted: \(names)."
             if let blockers = outcome.blockerSummary { body += " Blocked by \(blockers)." }
             Notifier.shared.post(title: "Park failed", body: body)
+            Chime.failed.play()
             return
         }
 
@@ -240,17 +241,21 @@ final class AppState: ObservableObject {
                 Notifier.shared.post(
                     title: "Tower parked, safe to unplug",
                     body: "\(parkedNames.count) volume(s) verified unmounted in \(seconds).")
+                // The one sound that means "pull the cable". Nothing else uses it.
+                Chime.safeToUnplug.play()
             } else {
                 let names = stillMountedIgnored.map { $0.displayName }.joined(separator: ", ")
                 Notifier.shared.post(
                     title: "Tower parked, but not safe to unplug",
                     body: "\(names) is on the ignore list and still mounted. Verified in \(seconds).")
+                Chime.partial.play()
             }
         } else {
             let names = parkedNames.joined(separator: ", ")
             Notifier.shared.post(
                 title: names.isEmpty ? "Parked" : "\(names) parked",
                 body: "\(mountedCount) of \(volumes.count) volumes still mounted. Not safe to unplug yet.")
+            Chime.partial.play()
         }
     }
 
