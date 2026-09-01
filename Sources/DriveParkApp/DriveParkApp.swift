@@ -39,6 +39,7 @@ final class AppState: ObservableObject {
     /// Live progress while a park runs. Counting up, never down: the measured
     /// unmount time is bimodal, half a second or eleven, so a countdown would
     /// be wrong a third of the time and you would learn to distrust it.
+    @Published var hotKeyEnabled: Bool = Preferences.hotKeyEnabled
     @Published var workingSince: Date?
     @Published var workingOn: String = ""
     private var tickTimer: Timer?
@@ -50,6 +51,7 @@ final class AppState: ObservableObject {
     init() {
         refresh()
         Notifier.shared.requestAuthorizationIfNeeded()
+        applyHotKey()
         triggers.state = self
         triggers.start()
         if let failure = triggers.powerWatchFailure { message = failure }
@@ -119,6 +121,8 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Manual actions
+
+    func triggersNoteManualPark() { triggers.noteManualPark() }
 
     func park(only: Set<String>? = nil, label: String? = nil) {
         triggers.noteManualPark()
@@ -300,6 +304,49 @@ final class AppState: ObservableObject {
         objectWillChange.send()
     }
 
+    /// One keystroke, both directions. Park when anything is mounted, release
+    /// when everything is parked. The chimes tell the two apart, which is why
+    /// a toggle is safe here: you always hear which way it went.
+    func hotKeyPressed() {
+        guard !busy, !volumes.isEmpty else { return }
+        triggers.noteManualPark()
+        if isParked {
+            release()
+        } else {
+            park()
+        }
+    }
+
+    func applyHotKey() {
+        if Preferences.hotKeyEnabled {
+            HotKeyCenter.shared.action = { [weak self] in self?.hotKeyPressed() }
+            if !HotKeyCenter.shared.register(), let failure = HotKeyCenter.shared.failure {
+                message = failure
+            }
+        } else {
+            HotKeyCenter.shared.unregister()
+        }
+        hotKeyEnabled = Preferences.hotKeyEnabled
+    }
+
+    func setHotKeyEnabled(_ on: Bool) {
+        Preferences.hotKeyEnabled = on
+        applyHotKey()
+        if on, HotKeyCenter.shared.isRegistered {
+            message = "\(HotKeyCenter.displayName) parks the tower, and releases it when parked."
+        } else if !on {
+            message = "Global shortcut off."
+        }
+    }
+
+    var hotKeyLine: String {
+        if !Preferences.hotKeyEnabled { return "Global shortcut: off" }
+        if HotKeyCenter.shared.isRegistered {
+            return "Global shortcut: \(HotKeyCenter.displayName)"
+        }
+        return HotKeyCenter.shared.failure ?? "Global shortcut: unavailable"
+    }
+
     func setLaunchAtLogin(_ on: Bool) {
         if let failure = LoginItem.setEnabled(on) {
             message = failure
@@ -350,8 +397,10 @@ struct MenuContent: View {
         }
         Divider()
         Button(state.busy ? "Working…" : "Park Tower") {
+            state.triggersNoteManualPark()
             state.park()
         }
+        .keyboardShortcut("p", modifiers: [.control, .option, .command])
         .disabled(state.busy || state.isParked || state.volumes.isEmpty)
         Button("Release (remount all)") {
             state.release()
@@ -384,6 +433,11 @@ struct MenuContent: View {
             Toggle("Launch at login", isOn: Binding(
                 get: { state.launchAtLogin },
                 set: { state.setLaunchAtLogin($0) }))
+            Divider()
+            Text(state.hotKeyLine)
+            Toggle("Global shortcut (\(HotKeyCenter.displayName))", isOn: Binding(
+                get: { state.hotKeyEnabled },
+                set: { state.setHotKeyEnabled($0) }))
         }
 
         if !state.message.isEmpty {

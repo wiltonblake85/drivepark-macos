@@ -84,6 +84,15 @@ public enum Preferences {
     /// verify and report before the machine goes down.
     public static let sleepParkBudget: TimeInterval = 20
 
+    /// Global shortcut on or off. Default on: a hotkey nobody knows about is
+    /// the same as no hotkey, and the menu shows the combination next to the
+    /// action so it is discoverable rather than folklore.
+    private static let hotKeyKey = "hotKeyEnabled"
+    public static var hotKeyEnabled: Bool {
+        get { store.object(forKey: hotKeyKey) as? Bool ?? true }
+        set { store.set(newValue, forKey: hotKeyKey) }
+    }
+
     // MARK: - The manage list
 
     private static let ignoredKey = "ignoredVolumeUUIDs"
