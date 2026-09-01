@@ -36,6 +36,12 @@ final class AppState: ObservableObject {
     @Published var autoReleaseOnWake: Bool = Preferences.autoReleaseOnWake
     @Published var launchAtLogin: Bool = LoginItem.isEnabled
     @Published var ignoredUUIDs: Set<String> = Preferences.ignoredVolumeUUIDs
+    /// Live progress while a park runs. Counting up, never down: the measured
+    /// unmount time is bimodal, half a second or eleven, so a countdown would
+    /// be wrong a third of the time and you would learn to distrust it.
+    @Published var workingSince: Date?
+    @Published var workingOn: String = ""
+    private var tickTimer: Timer?
 
     let engine = Engine()
     private let triggers = TriggerCoordinator()
@@ -43,6 +49,7 @@ final class AppState: ObservableObject {
 
     init() {
         refresh()
+        Notifier.shared.requestAuthorizationIfNeeded()
         triggers.state = self
         triggers.start()
         if let failure = triggers.powerWatchFailure { message = failure }
@@ -73,6 +80,13 @@ final class AppState: ObservableObject {
         if enclosureStalled { return "Enclosure not fully answering" }
         if isParked { return "Parked, safe to power off" }
         return "\(mountedCount) of \(volumes.count) volumes mounted"
+    }
+
+    var elapsedLine: String? {
+        guard let workingSince else { return nil }
+        let seconds = Int(Date().timeIntervalSince(workingSince).rounded())
+        let what = workingOn.isEmpty ? "Working" : workingOn
+        return "\(what), \(seconds)s  (usually under 2s, occasionally 11)"
     }
 
     /// The receipt. Every claim in this app traces to a fresh state read, and
@@ -161,18 +175,82 @@ final class AppState: ObservableObject {
         }
         busy = true
         message = triggerLabel.map { "Parking because \($0)…" } ?? "Parking…"
+        startTicking()
         let engine = self.engine
+        let before = volumes
         Task.detached {
-            let outcome = engine.park(onlyDisks: only, deadline: deadline)
+            let outcome = engine.park(onlyDisks: only, deadline: deadline) { line in
+                Task { @MainActor in self.workingOn = line }
+            }
             let found = engine.discover()
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.disks = found
                 self.lastVerifiedAt = Date()
                 self.busy = false
+                self.stopTicking()
                 self.message = Self.describe(outcome, label: label, trigger: triggerLabel)
+                self.notify(outcome, scoped: only != nil, before: before)
             }
             completion?(outcome)
+        }
+    }
+
+    private func startTicking() {
+        workingSince = Date()
+        workingOn = ""
+        tickTimer?.invalidate()
+        // Drives the elapsed readout. Counting up is a fact; counting down
+        // would be a prediction this tool cannot honestly make.
+        tickTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.objectWillChange.send() }
+        }
+    }
+
+    private func stopTicking() {
+        tickTimer?.invalidate()
+        tickTimer = nil
+        workingSince = nil
+        workingOn = ""
+    }
+
+    /// Three outcomes, three different sentences. The distinction that matters
+    /// is partial versus whole: "Backup parked" must never read as "safe to
+    /// unplug" while two other drives are still mounted.
+    private func notify(_ outcome: ParkOutcome, scoped: Bool, before: [Volume]) {
+        guard outcome.didWork || !outcome.parked else { return }
+
+        if !outcome.parked {
+            let names = outcome.stillMounted.map { $0.displayName }.joined(separator: ", ")
+            var body = "Still mounted: \(names)."
+            if let blockers = outcome.blockerSummary { body += " Blocked by \(blockers)." }
+            Notifier.shared.post(title: "Park failed", body: body)
+            return
+        }
+
+        let parkedNames = outcome.results.filter { $0.success }
+            .map { $0.volume.displayName }
+        let seconds = String(format: "%.1fs", outcome.timing.total)
+
+        if isParked {
+            // Everything DrivePark manages is unmounted. Only now is the
+            // undock question even askable.
+            let stillMountedIgnored = ignoredVolumes.filter { $0.isMounted }
+            if stillMountedIgnored.isEmpty {
+                Notifier.shared.post(
+                    title: "Tower parked, safe to unplug",
+                    body: "\(parkedNames.count) volume(s) verified unmounted in \(seconds).")
+            } else {
+                let names = stillMountedIgnored.map { $0.displayName }.joined(separator: ", ")
+                Notifier.shared.post(
+                    title: "Tower parked, but not safe to unplug",
+                    body: "\(names) is on the ignore list and still mounted. Verified in \(seconds).")
+            }
+        } else {
+            let names = parkedNames.joined(separator: ", ")
+            Notifier.shared.post(
+                title: names.isEmpty ? "Parked" : "\(names) parked",
+                body: "\(mountedCount) of \(volumes.count) volumes still mounted. Not safe to unplug yet.")
         }
     }
 
@@ -242,7 +320,9 @@ struct MenuContent: View {
 
     var body: some View {
         Text(state.statusLine)
-        if let verified = state.verifiedLine {
+        if let elapsed = state.elapsedLine {
+            Text(elapsed)
+        } else if let verified = state.verifiedLine {
             Text(verified)
         }
         Divider()
