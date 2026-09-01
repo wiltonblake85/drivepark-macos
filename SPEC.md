@@ -1,6 +1,6 @@
-# park — v1 Engine Spec
+# DrivePark — v1 Engine Spec
 
-Working title: `park` (final name open). Date: 2026-08-31.
+Name: DrivePark (settled 2026-09-01). CLI command: `park`. Date: 2026-08-31.
 Evidence base: live diagnostic session on mac-lan with a TerraMaster 3-bay DAS
 (volumes Backup, Plex, Bottom Drawer; all APFS; TDAS USB bridge). Behavior was
 identical with the enclosure connected through the ProDock TB4 and connected
@@ -126,7 +126,7 @@ consulted but not copied.
      is visible when stdout is a pipe, not only a terminal.
 - Non-APFS support shipped (2026-08-31): discovery now includes direct
   partitions (exFAT, FAT32, NTFS, HFS+); proven against a software exFAT
-  drive that Park unmounted, ejected, and fully detached. `--only diskN`
+  drive that DrivePark unmounted, ejected, and fully detached. `--only diskN`
   scopes park/release to one disk. Remaining edge cases: partitionless
   "superfloppy" volumes, and APFS containers spanning multiple physical
   stores (Fusion-style).

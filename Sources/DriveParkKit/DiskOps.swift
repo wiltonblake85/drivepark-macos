@@ -103,7 +103,7 @@ final class DiskOps {
             guard parkedVolumeUUIDs.contains(uuid) else { return nil }
             let name = (description[kDADiskDescriptionVolumeNameKey] as? String) ?? "volume"
             print("Vetoed remount of \"\(name)\" while parked.")
-            let dissenter = DADissenterCreate(kCFAllocatorDefault, daReturn(kDAReturnExclusiveAccess), "Parked by park" as CFString)
+            let dissenter = DADissenterCreate(kCFAllocatorDefault, daReturn(kDAReturnExclusiveAccess), "Parked by DrivePark" as CFString)
             return Unmanaged.passRetained(dissenter)
         }, nil)
     }

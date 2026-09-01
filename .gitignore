@@ -2,3 +2,5 @@
 .attic/
 .DS_Store
 .swiftpm/
+FEATURES.md
+HANDOFF.md

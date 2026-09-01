@@ -1,4 +1,4 @@
-# Park
+# DrivePark
 
 A macOS menu bar utility for people whose external drives never actually eject.
 
@@ -18,22 +18,22 @@ the Disk Arbitration logs while reproducing it, two things fell out:
    detach. A tool claiming otherwise is reporting a request status, not
    reality.
 
-So "eject" is the wrong promise for this hardware. Park makes a different
+So "eject" is the wrong promise for this hardware. DrivePark makes a different
 one: unmount everything, verify it against a fresh read of system state,
 hold it unmounted, and say plainly when the enclosure is safe to power off.
 
-## What Park does
+## What DrivePark does
 
-- One click parks the tower: Park unmounts every volume on every external
+- One click parks the tower: DrivePark unmounts every volume on every external
   disk, in sequence, with retries.
-- When macOS refuses an unmount, Park names the process holding the files
+- When macOS refuses an unmount, DrivePark names the process holding the files
   ("blocked by IINA (pid 97495)") so you aren't left guessing.
-- Park verifies every claim; it re-reads the mount table after acting and
+- DrivePark verifies every claim; it re-reads the mount table after acting and
   never reports success from a callback.
-- While parked, Park vetoes remount attempts, so a re-enumerating enclosure
+- While parked, DrivePark vetoes remount attempts, so a re-enumerating enclosure
   cannot silently bring volumes back. Even `diskutil mount` gets refused
-  with "Parked by park".
-- Park sends each parked disk a courtesy spin-down and reports what
+  with "Parked by DrivePark".
+- DrivePark sends each parked disk a courtesy spin-down and reports what
   actually happened: spun down, detached, or still attached.
 - The menu bar icon is the answer: a checkmark means it's safe to power off.
 
@@ -42,10 +42,10 @@ hold it unmounted, and say plainly when the enclosure is safe to power off.
 Build from source for now (a signed, notarized download is planned):
 
 ```sh
-git clone https://github.com/wiltonblake85/park-macos.git
-cd park-macos
+git clone https://github.com/wiltonblake85/drivepark-macos.git
+cd drivepark-macos
 ./scripts/build-app.sh
-open ~/Applications/Park.app
+open ~/Applications/DrivePark.app
 ```
 
 Requires macOS 14 or later and Xcode command line tools.

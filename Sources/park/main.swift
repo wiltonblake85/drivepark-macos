@@ -1,7 +1,7 @@
-// park — CLI front end over ParkKit. Truth comes from fresh state reads.
+// park — CLI front end over DriveParkKit. Truth comes from fresh state reads.
 
 import Foundation
-import ParkKit
+import DriveParkKit
 
 setvbuf(stdout, nil, _IONBF, 0)
 

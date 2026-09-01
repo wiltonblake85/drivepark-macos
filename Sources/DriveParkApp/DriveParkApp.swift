@@ -1,12 +1,12 @@
-// ParkApp — menu bar app over ParkKit. While this app runs after a full
+// DriveParkApp — menu bar app over DriveParkKit. While this app runs after a full
 // park, the remount veto stays armed; Release drops it and remounts.
 
 import SwiftUI
 import AppKit
-import ParkKit
+import DriveParkKit
 
 @main
-struct ParkApp: App {
+struct DriveParkApp: App {
     @StateObject private var state = AppState()
 
     var body: some Scene {
@@ -140,7 +140,7 @@ struct MenuContent: View {
         }
         Divider()
         Button("Refresh") { state.refresh() }
-        Button("Quit Park") { NSApp.terminate(nil) }
+        Button("Quit DrivePark") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
     }
 }

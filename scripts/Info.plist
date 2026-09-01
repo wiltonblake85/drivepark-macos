@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Park</string>
-    <key>CFBundleDisplayName</key><string>Park</string>
-    <key>CFBundleIdentifier</key><string>com.wiltonblake.park</string>
-    <key>CFBundleExecutable</key><string>Park</string>
+    <key>CFBundleName</key><string>DrivePark</string>
+    <key>CFBundleDisplayName</key><string>DrivePark</string>
+    <key>CFBundleIdentifier</key><string>com.wiltonblake.drivepark</string>
+    <key>CFBundleExecutable</key><string>DrivePark</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
