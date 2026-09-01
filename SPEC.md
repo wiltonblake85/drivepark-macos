@@ -129,6 +129,13 @@ consulted but not copied.
   Improvement surfaced:
   4. Flush stdout after each print (setvbuf/FileHandle) so `--hold` progress
      is visible when stdout is a pipe, not only a terminal.
+- Global shortcut (2026-09-01, passed on hardware). Control Option Command P
+  registered through Carbon RegisterEventHotKey with no Accessibility
+  permission requested, fired from outside the app, and toggled correctly in
+  both directions: one press parked the tower, a second press released it, with
+  all three volumes verified mounted afterward on a fresh read. This is the
+  trigger that matters on a machine where idle sleep is held off by a power
+  assertion, because it is the only one the user drives deliberately.
 - Park timing, measured (2026-09-01). Six scoped parks across two TDAS bays,
   each followed by a release. Unmount durations in order: 11.26, 0.59, 0.79,
   0.51, 0.91, 10.83 seconds. Median sits under a second, and end to end a park
