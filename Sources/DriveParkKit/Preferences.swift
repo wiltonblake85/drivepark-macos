@@ -142,6 +142,37 @@ public enum Preferences {
         hotKeyDisplay = defaultHotKeyDisplay
     }
 
+    // MARK: - Heartbeat
+    //
+    // The app writes the time on every refresh. Anything else can then tell
+    // "running" from "gone" without asking the process table, which matters
+    // because every automatic park depends on the app being alive and nothing
+    // used to say whether it was.
+
+    private static let heartbeatKey = "lastHeartbeat"
+    /// Refresh runs every 30 s, so anything past a couple of minutes is dead
+    /// rather than briefly busy.
+    public static let heartbeatStaleAfter: TimeInterval = 150
+
+    public static func recordHeartbeat() {
+        store.set(Date().timeIntervalSince1970, forKey: heartbeatKey)
+    }
+
+    public static var lastHeartbeat: Date? {
+        let stamp = store.double(forKey: heartbeatKey)
+        return stamp > 0 ? Date(timeIntervalSince1970: stamp) : nil
+    }
+
+    /// nil when the app has never run. Otherwise how long since it checked in.
+    public static var heartbeatAge: TimeInterval? {
+        lastHeartbeat.map { Date().timeIntervalSince($0) }
+    }
+
+    public static var appLooksAlive: Bool {
+        guard let age = heartbeatAge else { return false }
+        return age < heartbeatStaleAfter
+    }
+
     /// Global shortcut on or off. Default on: a hotkey nobody knows about is
     /// the same as no hotkey, and the menu shows the combination next to the
     /// action so it is discoverable rather than folklore.

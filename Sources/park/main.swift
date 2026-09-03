@@ -13,7 +13,9 @@ func printStatus() {
     }
     var mounted = 0
     var total = 0
-    print("PARK STATUS — \(disks.count) external disk(s)\n")
+    print("PARK STATUS — \(disks.count) external disk(s)")
+    if !Preferences.appLooksAlive { print(appLivenessLine()) }
+    print("")
     for disk in disks {
         if disk.infoAnswered {
             let media = disk.removableMedia ? "removable" : "FIXED (eject cannot detach)"
@@ -56,6 +58,27 @@ func printStatus() {
     } else {
         print("Overall: \(mounted) of \(total) volume(s) still mounted. NOT safe to power off.")
     }
+}
+
+
+/// The app being alive is a precondition for every automatic park, so the CLI
+/// says so plainly rather than leaving it to be noticed.
+func appLivenessLine() -> String {
+    guard let age = Preferences.heartbeatAge else {
+        return "DrivePark app: has never run on this Mac. No automatic parking."
+    }
+    if Preferences.appLooksAlive {
+        return "DrivePark app: running."
+    }
+    let minutes = Int(age / 60)
+    let howLong: String
+    switch minutes {
+    case ..<60:      howLong = "\(minutes) minute(s) ago"
+    case ..<(60*48): howLong = "\(minutes / 60) hour(s) ago"
+    default:         howLong = "\(minutes / 1440) day(s) ago"
+    }
+    return "DrivePark app: NOT RUNNING. Last check-in \(howLong). "
+        + "Auto-park triggers and the global shortcut are all dead until it starts."
 }
 
 let arguments = CommandLine.arguments.dropFirst()
@@ -153,6 +176,8 @@ case "ignore", "manage":
         : "\"\(match.displayName)\" is managed again.")
 case "triggers":
     print("AUTOMATIC PARKING\n")
+    print(appLivenessLine())
+    print("")
     for status in TriggerHealth.allStatuses() {
         let armed = Preferences.isEnabled(status.trigger) ? "ARMED " : "off   "
         let health = status.canFire ? "" : "  <- CANNOT FIRE"
@@ -161,6 +186,11 @@ case "triggers":
     }
     let dead = TriggerHealth.armedButDead()
     print("")
+    if !Preferences.appLooksAlive && !Preferences.enabledTriggers.isEmpty {
+        print("WARNING: triggers are armed but the app is not running, so none")
+        print("of them can fire. Start DrivePark.")
+        exit(1)
+    }
     if dead.isEmpty {
         print("Every armed trigger can fire.")
     } else {

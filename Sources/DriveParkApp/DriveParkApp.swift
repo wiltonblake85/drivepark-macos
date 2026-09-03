@@ -122,6 +122,10 @@ final class AppState: ObservableObject {
                 guard let self else { return }
                 self.disks = found
                 self.lastVerifiedAt = Date()
+                // Heartbeat. Every trigger in this app depends on the app
+                // being alive, and until now nothing anywhere said whether it
+                // was. Absence is the one failure it could not report.
+                Preferences.recordHeartbeat()
                 self.enclosureStalled = stalled
                 self.refreshing = false
                 var warnings: [ParkTrigger: String] = [:]
@@ -441,7 +445,9 @@ final class AppState: ObservableObject {
         if let failure = LoginItem.setEnabled(on) {
             message = failure
         } else {
-            message = on ? "DrivePark will start at login." : "DrivePark will not start at login."
+            message = on
+                ? "DrivePark will start at login and restart if it dies."
+                : "Keep-running is off."
         }
         launchAtLogin = LoginItem.isEnabled
     }
@@ -530,7 +536,7 @@ struct MenuContent: View {
                 get: { state.autoReleaseOnWake },
                 set: { state.setAutoRelease($0) }))
             Divider()
-            Toggle("Launch at login", isOn: Binding(
+            Toggle("Keep DrivePark running (start at login, restart if it dies)", isOn: Binding(
                 get: { state.launchAtLogin },
                 set: { state.setLaunchAtLogin($0) }))
             Divider()

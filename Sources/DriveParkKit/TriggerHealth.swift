@@ -124,13 +124,16 @@ public enum TriggerHealth {
 
             if PowerSettings.idleSleepMinutes() == 0 {
                 var reason = "This Mac is set never to sleep on idle, so this will not fire."
-                if !holders.isEmpty { reason += " \(list(holders)) is holding sleep off." }
+                if !holders.isEmpty {
+                    reason += " \(list(holders)) \(verb(holders)) holding sleep off."
+                }
                 return TriggerStatus(trigger: trigger, canFire: false, reason: reason)
             }
             if !holders.isEmpty {
                 return TriggerStatus(
                     trigger: trigger, canFire: false,
-                    reason: "\(list(holders)) is holding sleep off, so this will not fire while it runs.")
+                    reason: "\(list(holders)) \(verb(holders)) holding sleep off, so this "
+                        + "will not fire while \(holders.count == 1 ? "it runs" : "they run").")
             }
             return TriggerStatus(trigger: trigger, canFire: true, reason: nil)
 
@@ -157,6 +160,13 @@ public enum TriggerHealth {
     /// because an unarmed trigger that cannot fire is nobody's problem.
     public static func armedButDead() -> [TriggerStatus] {
         allStatuses().filter { Preferences.isEnabled($0.trigger) && !$0.canFire }
+    }
+
+    /// Subject-verb agreement. "Claude and perplexityd is holding sleep off"
+    /// is the kind of sentence that makes a careful reader trust the numbers
+    /// less, which for this tool is expensive.
+    private static func verb(_ names: [String]) -> String {
+        names.count == 1 ? "is" : "are"
     }
 
     private static func list(_ names: [String]) -> String {

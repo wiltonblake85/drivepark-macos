@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.wiltonblake.drivepark.agent</string>
+    <!-- Relative to the app bundle. SMAppService resolves it, so the agent
+         keeps working when the app moves. -->
+    <key>BundleProgram</key><string>Contents/MacOS/DrivePark</string>
+    <key>RunAtLoad</key><true/>
+    <!-- SuccessfulExit false is the whole design. Quit from the menu exits 0
+         and DrivePark stays quit, because a user who quits meant it. Anything
+         else, a kill, a crash, a bundle replaced underneath it, is an
+         abnormal exit and gets restarted. Plain KeepAlive would resurrect the
+         app every time you tried to quit, which is malware behaviour. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key><false/>
+    </dict>
+    <key>AssociatedBundleIdentifiers</key>
+    <array><string>com.wiltonblake.drivepark</string></array>
+    <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>

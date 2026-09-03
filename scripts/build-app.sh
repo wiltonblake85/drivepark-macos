@@ -16,6 +16,27 @@ set -e
 cd "$(dirname "$0")/.."
 swift build -c release --product DriveParkApp
 APP="$HOME/Applications/DrivePark.app"
+
+# Stop a running copy before replacing the bundle underneath it.
+#
+# rm -rf on a running app does not error, it just quietly kills the process a
+# moment later: macOS validates signed pages that no longer exist, and with a
+# hardened runtime it is less forgiving still. No crash report, no log line,
+# nothing. It cost an afternoon on 2026-09-01, when the app vanished from the
+# menu bar and the only evidence was its absence.
+WAS_RUNNING=0
+if pgrep -f "DrivePark.app/Contents/MacOS/DrivePark" >/dev/null 2>&1; then
+  WAS_RUNNING=1
+  echo "Stopping the running copy first"
+  osascript -e 'quit app "DrivePark"' >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5; do
+    pgrep -f "DrivePark.app/Contents/MacOS/DrivePark" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  pkill -f "DrivePark.app/Contents/MacOS/DrivePark" >/dev/null 2>&1 || true
+  sleep 1
+fi
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp .build/release/DriveParkApp "$APP/Contents/MacOS/DrivePark"
@@ -24,6 +45,10 @@ mkdir -p "$APP/Contents/Resources"
 # Classic four-byte type/creator file. Xcode still writes it, and some
 # subsystems that inspect bundles predate reading Info.plist alone.
 printf 'APPL????' > "$APP/Contents/PkgInfo"
+# The watchdog agent. SMAppService requires the plist to live here.
+mkdir -p "$APP/Contents/Library/LaunchAgents"
+cp scripts/LaunchAgent.plist \
+   "$APP/Contents/Library/LaunchAgents/com.wiltonblake.drivepark.agent.plist"
 
 # Override with DRIVEPARK_SIGN_IDENTITY if you need a specific certificate.
 IDENTITY="${DRIVEPARK_SIGN_IDENTITY:-}"
@@ -46,6 +71,11 @@ else
   codesign --force --sign - "$APP"
   echo "WARNING: ad-hoc signed. Notifications will not work and TCC will"
   echo "re-prompt on every build. Install a Developer ID certificate."
+fi
+
+if [[ "$WAS_RUNNING" == "1" ]]; then
+  open "$APP"
+  echo "Relaunched, because it was running before this build"
 fi
 
 echo "Built and installed: $APP"
