@@ -81,6 +81,43 @@ func appLivenessLine() -> String {
         + "Auto-park triggers and the global shortcut are all dead until it starts."
 }
 
+
+/// A card in the notch, for the runs nobody is watching.
+///
+/// When stdout is a terminal the person is already reading the result, and a
+/// second copy in the notch is noise. When it is a pipe, a log, a cron job or
+/// a launchd plist, the terminal output goes nowhere anyone will see, and the
+/// card is the only report that reaches a human. Silent when Transom is not
+/// installed or the token is missing; a card must never change what a park
+/// does or what it exits with.
+func postCardIfUnattended(_ outcome: ParkOutcome, scoped: Bool) {
+    guard isatty(STDOUT_FILENO) == 0 else { return }
+    if outcome.parked {
+        if scoped {
+            Transom.postAndWait(
+                title: "Selected drive parked",
+                message: "Other drives in the enclosure may still be mounted. Not safe to undock.",
+                symbol: "externaldrive",
+                duration: 10)
+        } else {
+            Transom.postAndWait(
+                title: "Safe to undock",
+                message: "All volumes verified unmounted. Pull the cable.",
+                symbol: "externaldrive.badge.checkmark",
+                duration: 10)
+        }
+        return
+    }
+    let names = outcome.stillMounted.map { $0.displayName }.joined(separator: ", ")
+    var body = "Still mounted: \(names)."
+    if let blockers = outcome.blockerSummary { body += " Blocked by \(blockers)." }
+    Transom.postAndWait(title: "Park failed, do not undock",
+                        message: body,
+                        symbol: "externaldrive.trianglebadge.exclamationmark",
+                        persistent: true,
+                        urgent: true)
+}
+
 let arguments = CommandLine.arguments.dropFirst()
 switch arguments.first ?? "status" {
 case "status":
@@ -111,6 +148,7 @@ case "now":
         print("\nNo action taken. Nothing this run manages was mounted.")
         exit(0)
     }
+    postCardIfUnattended(outcome, scoped: onlyDisks != nil)
     if outcome.parked {
         if onlyDisks == nil {
             print("\nPARKED. All volumes verified unmounted. Safe to power off the enclosure.")
@@ -199,6 +237,55 @@ case "triggers":
         print("setting problem, it is the machine's current power state.")
         exit(1)
     }
+case "transom" where arguments.dropFirst().first == "token":
+    // Read rather than taken as an argument, so the token never lands in
+    // shell history or in the process list.
+    print("Transom → Preferences → Advanced → Local API. Paste the token, then Return.")
+    print("Empty line clears the stored token.")
+    let typed = (readLine() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    Preferences.transomToken = typed.isEmpty ? nil : typed
+    Transom.forgetCachedToken()
+    if typed.isEmpty {
+        print("Cleared.")
+        exit(0)
+    }
+    if Transom.postAndWait(title: "DrivePark token saved",
+                           message: "Park results will land here.",
+                           symbol: "externaldrive.badge.checkmark",
+                           duration: 6) {
+        print("Saved, and a card was delivered. Look at the notch.")
+    } else {
+        print("Saved, but the card was refused: \(Transom.lastFailure ?? "unknown")")
+        exit(1)
+    }
+case "transom":
+    // Proves the channel by using it. Anything less reports on configuration
+    // rather than on whether a card actually arrives.
+    print("Endpoint: \(Transom.endpoint.absoluteString)")
+    print("Enabled:  \(Preferences.transomEnabled ? "yes" : "no (park transom on)")")
+    if arguments.dropFirst().first == "on" {
+        Preferences.transomEnabled = true
+        print("Notch cards switched on.")
+    } else if arguments.dropFirst().first == "off" {
+        Preferences.transomEnabled = false
+        print("Notch cards switched off. Nothing else changes.")
+        exit(0)
+    }
+    let hasToken = Transom.resolveToken() != nil
+    print("Token:    \(hasToken ? "found, posting to the local API" : "none, posting by transom:// link")")
+    let delivered = Transom.postAndWait(
+        title: "DrivePark test card",
+        message: "Posted by `park transom`.",
+        symbol: "externaldrive.badge.checkmark",
+        duration: 6)
+    if delivered {
+        print(hasToken
+            ? "Card delivered, Transom answered 200. Look at the notch."
+            : "Link handed to Transom. Look at the notch; without a token there is no receipt.")
+    } else {
+        print("NOT DELIVERED: \(Transom.lastFailure ?? "unknown")")
+        exit(1)
+    }
 case "ignored":
     let volumes = discoverExternalDisks().flatMap { $0.allVolumes }
     let ignored = volumes.filter { Preferences.isIgnored($0.uuid) }
@@ -210,6 +297,7 @@ case "ignored":
     }
 default:
     print("usage: park [status | now [--hold] [--force] [--only diskN] | release [--only diskN]")
-    print("            | ignore <volume> | manage <volume> | ignored | triggers]")
+    print("            | ignore <volume> | manage <volume> | ignored | triggers")
+    print("            | transom [on|off|token]]")
     exit(64)
 }

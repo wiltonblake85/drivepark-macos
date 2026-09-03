@@ -45,6 +45,10 @@ final class AppState: ObservableObject {
     /// Live progress while a park runs. Counting up, never down: the measured
     /// unmount time is bimodal, half a second or eleven, so a countdown would
     /// be wrong a third of the time and you would learn to distrust it.
+    /// Notch cards through Transom. Mirrored here so the menu can show the
+    /// channel's real state, including when a post was refused.
+    @Published var transomEnabled: Bool = Preferences.transomEnabled
+    @Published var transomFailure: String?
     @Published var hotKeyEnabled: Bool = Preferences.hotKeyEnabled
     @Published var hotKeyDisplay: String = Preferences.hotKeyDisplay
     @Published var hotKeySystemConflict: String?
@@ -139,6 +143,7 @@ final class AppState: ObservableObject {
                     warnings[status.trigger] = status.reason
                 }
                 self.triggerWarnings = warnings
+                self.transomFailure = Transom.lastFailure
                 if stalled, self.message.isEmpty || self.message.hasPrefix("Enclosure") {
                     self.message = "Enclosure not answering detail queries. Volume state is still accurate."
                 }
@@ -278,9 +283,18 @@ final class AppState: ObservableObject {
         workingOn = ""
     }
 
-    /// Three outcomes, three different sentences. The distinction that matters
-    /// is partial versus whole: "Backup parked" must never read as "safe to
-    /// unplug" while two other drives are still mounted.
+    /// Three outcomes, three different sentences, on three channels.
+    ///
+    /// The distinction that matters is partial versus whole: "Backup parked"
+    /// must never read as "safe to undock" while two other drives are still
+    /// mounted.
+    ///
+    /// Chime, banner, card. The chime is the only one that survives a locked
+    /// screen, the banner is refused by macOS on this machine (SPEC section
+    /// 10) and is still attempted in case that ever changes, and the card is
+    /// the one you can actually read. Anything that means "do not pull the
+    /// cable" is posted persistent, so it cannot time out while your hand is
+    /// behind the desk.
     private func notify(_ outcome: ParkOutcome, scoped: Bool, before: [Volume]) {
         guard outcome.didWork || !outcome.parked else { return }
 
@@ -289,6 +303,11 @@ final class AppState: ObservableObject {
             var body = "Still mounted: \(names)."
             if let blockers = outcome.blockerSummary { body += " Blocked by \(blockers)." }
             Notifier.shared.post(title: "Park failed", body: body)
+            Transom.post(title: "Park failed, do not undock",
+                         message: body,
+                         symbol: "externaldrive.trianglebadge.exclamationmark",
+                         persistent: true,
+                         urgent: true)
             Chime.failed.play()
             return
         }
@@ -305,6 +324,12 @@ final class AppState: ObservableObject {
                 Notifier.shared.post(
                     title: "Tower parked, safe to unplug",
                     body: "\(parkedNames.count) volume(s) verified unmounted in \(seconds).")
+                Transom.post(
+                    title: "Safe to undock",
+                    message: "\(parkedNames.count) volume(s) verified unmounted in \(seconds). "
+                        + "Pull the cable.",
+                    symbol: "externaldrive.badge.checkmark",
+                    duration: 10)
                 // The one sound that means "pull the cable". Nothing else uses it.
                 Chime.safeToUnplug.play()
             } else {
@@ -312,6 +337,16 @@ final class AppState: ObservableObject {
                 Notifier.shared.post(
                     title: "Tower parked, but not safe to unplug",
                     body: "\(names) is on the ignore list and still mounted. Verified in \(seconds).")
+                // Persistent on purpose. This one looks like success in the
+                // menu bar icon and is not, and a card that fades in six
+                // seconds is how a mounted drive gets yanked.
+                Transom.post(
+                    title: "Parked, but do NOT undock",
+                    message: "\(names) is on the ignore list and still mounted. "
+                        + "Verified in \(seconds).",
+                    symbol: "exclamationmark.triangle.fill",
+                    persistent: true,
+                    urgent: true)
                 Chime.partial.play()
             }
         } else {
@@ -319,6 +354,12 @@ final class AppState: ObservableObject {
             Notifier.shared.post(
                 title: names.isEmpty ? "Parked" : "\(names) parked",
                 body: "\(mountedCount) of \(volumes.count) volumes still mounted. Not safe to unplug yet.")
+            Transom.post(
+                title: names.isEmpty ? "Parked" : "\(names) parked",
+                message: "\(mountedCount) of \(volumes.count) volumes still mounted. "
+                    + "Not safe to undock yet.",
+                symbol: "externaldrive",
+                duration: 10)
             Chime.partial.play()
         }
     }
@@ -447,6 +488,73 @@ final class AppState: ObservableObject {
         return HotKeyCenter.shared.failure ?? "Global shortcut: unavailable"
     }
 
+    func setTransomEnabled(_ on: Bool) {
+        Preferences.transomEnabled = on
+        transomEnabled = on
+        message = on
+            ? "Park results will post a card to the Transom notch."
+            : "Notch cards off. Chimes still play."
+        if on { testTransom() }
+    }
+
+    func askForTransomToken() {
+        guard let answer = TokenPrompt.ask(current: Preferences.transomToken) else { return }
+        if answer == .some(TokenPrompt.readFromKeychain) {
+            // Explicit, so the modal Keychain prompt lands while the user is
+            // already looking at a dialog, never in the middle of a park.
+            Task.detached {
+                let found = Transom.keychainToken()
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    guard let found else {
+                        self.message = "Nothing readable in the Keychain. "
+                            + "Copy the token from Transom → Advanced → Local API instead."
+                        return
+                    }
+                    Preferences.transomToken = found
+                    Transom.forgetCachedToken()
+                    self.testTransom()
+                }
+            }
+            return
+        }
+        Preferences.transomToken = answer
+        Transom.forgetCachedToken()
+        guard answer != nil else {
+            transomFailure = nil
+            message = "Transom token cleared."
+            return
+        }
+        // Prove it before saying it works. A saved token that 401s is a
+        // channel that looks configured and delivers nothing.
+        testTransom()
+    }
+
+    /// Posts a real card rather than reporting on configuration. A channel
+    /// that has not carried a message is not a channel that works.
+    func testTransom() {
+        Task.detached {
+            let delivered = Transom.postAndWait(
+                title: "DrivePark connected",
+                message: "Park results will land here.",
+                symbol: "externaldrive.badge.checkmark",
+                duration: 6)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.transomFailure = Transom.lastFailure
+                self.message = delivered
+                    ? "Test card posted to the notch."
+                    : (Transom.lastFailure ?? "Test card was not delivered.")
+            }
+        }
+    }
+
+    var transomLine: String {
+        if !transomEnabled { return "Notch cards: off" }
+        if let transomFailure { return "⚠︎ \(transomFailure)" }
+        return Transom.statusLine
+    }
+
     func setLaunchAtLogin(_ on: Bool) {
         if let failure = LoginItem.setEnabled(on) {
             message = failure
@@ -545,6 +653,14 @@ struct MenuContent: View {
             Toggle("Keep DrivePark running (start at login, restart if it dies)", isOn: Binding(
                 get: { state.launchAtLogin },
                 set: { state.setLaunchAtLogin($0) }))
+            Divider()
+            Text(state.transomLine)
+            Toggle("Post park results to the Transom notch", isOn: Binding(
+                get: { state.transomEnabled },
+                set: { state.setTransomEnabled($0) }))
+            Button("Send a test card") { state.testTransom() }
+                .disabled(!state.transomEnabled)
+            Button("Set Transom token…") { state.askForTransomToken() }
             Divider()
             Text(state.hotKeyLine)
             Toggle("Global shortcut", isOn: Binding(

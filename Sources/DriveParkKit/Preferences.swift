@@ -210,4 +210,40 @@ public enum Preferences {
         if on { current.insert(uuid.lowercased()) } else { current.remove(uuid.lowercased()) }
         ignoredVolumeUUIDs = current
     }
+
+    // MARK: - Transom, the notch channel
+    //
+    // macOS refuses this app's notification banners at registration, so the
+    // card in the notch is the only visual signal that works here. On by
+    // default: it costs nothing when Transom is not installed, because a
+    // refused post is silent and never touches the park.
+
+    private static let transomEnabledKey = "transomEnabled"
+    private static let transomTokenKey = "transomToken"
+
+    public static var transomEnabled: Bool {
+        get { store.object(forKey: transomEnabledKey) as? Bool ?? true }
+        set { store.set(newValue, forKey: transomEnabledKey) }
+    }
+
+    /// An explicit token, for when the Keychain read is declined or the token
+    /// is rotated. Plain text in the preferences domain, which is honest about
+    /// what it is: a loopback-only token for an app on this same Mac, not a
+    /// credential worth a Keychain round trip. The Keychain path is tried
+    /// first and needs no setup, so this stays empty for most installs.
+    public static var transomToken: String? {
+        get {
+            let raw = store.string(forKey: transomTokenKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (raw?.isEmpty ?? true) ? nil : raw
+        }
+        set {
+            let trimmed = newValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let trimmed, !trimmed.isEmpty {
+                store.set(trimmed, forKey: transomTokenKey)
+            } else {
+                store.removeObject(forKey: transomTokenKey)
+            }
+        }
+    }
 }

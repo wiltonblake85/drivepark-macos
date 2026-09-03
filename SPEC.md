@@ -152,6 +152,31 @@ consulted but not copied.
   the one hypothesis nothing here can rule out from inside. The diagnostics
   that produced every answer above live in the app and read back with
   `defaults read com.wiltonblake.drivepark`.
+- Notch cards through Transom (2026-09-03, passed on hardware). The way
+  around the banner refusal above, and the first working visual signal this
+  app has had. Transom is a notch app on this Mac with a token-secured HTTP
+  API on 127.0.0.1 and a transom:// URL scheme; DrivePark posts the same three
+  sentences the notifier writes. Verified end to end: a real park of the three
+  TDAS bays posted "Safe to undock" at 16:19:21, and a scoped park of Plex
+  against a held file posted "Park failed, do not undock. Still mounted: Plex.
+  Blocked by Plex: sleep (pid 61786)", persistent. Both confirmed in Transom's
+  own history file, not inferred from an exit code.
+
+  Two doors. The HTTP one needs a token and returns a real 200, which is the
+  only channel that can tell delivered from swallowed. The transom:// one
+  needs nothing, which is why it is the default: the notch works the moment
+  DrivePark is installed. Transom's Keychain item is not readable from another
+  process here (errSecItemNotFound, recorded as diag_transomKeychain), so the
+  token is pasted in once through Set Transom token…, and the Keychain read is
+  kept only as a first attempt in case that ever changes.
+
+  Known limit, and it matters for this particular signal: Transom holds
+  automation posts while a Focus mode is on, and shows them in the digest
+  afterwards. Both verified cards came back with held: true. A card that says
+  do not unplug is not the same kind of message as a build notification, and
+  there is no field in schema v1 to say so. Raised as a Transom question, not
+  a DrivePark one.
+
 - Global shortcut (2026-09-01, passed on hardware). Control Option Command P
   registered through Carbon RegisterEventHotKey with no Accessibility
   permission requested, fired from outside the app, and toggled correctly in
