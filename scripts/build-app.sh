@@ -25,15 +25,18 @@ APP="$HOME/Applications/DrivePark.app"
 # nothing. It cost an afternoon on 2026-09-01, when the app vanished from the
 # menu bar and the only evidence was its absence.
 WAS_RUNNING=0
-if pgrep -f "DrivePark.app/Contents/MacOS/DrivePark" >/dev/null 2>&1; then
+if pgrep -x DrivePark >/dev/null 2>&1; then
   WAS_RUNNING=1
   echo "Stopping the running copy first"
   osascript -e 'quit app "DrivePark"' >/dev/null 2>&1 || true
   for _ in 1 2 3 4 5; do
-    pgrep -f "DrivePark.app/Contents/MacOS/DrivePark" >/dev/null 2>&1 || break
+    pgrep -x DrivePark >/dev/null 2>&1 || break
     sleep 1
   done
-  pkill -f "DrivePark.app/Contents/MacOS/DrivePark" >/dev/null 2>&1 || true
+  # -x matches the executable name. -f with the full path silently misses the
+  # launchd-started copy, whose argv is the RELATIVE "Contents/MacOS/DrivePark"
+  # that BundleProgram gives it.
+  pkill -x DrivePark >/dev/null 2>&1 || true
   sleep 1
 fi
 
@@ -74,8 +77,18 @@ else
 fi
 
 if [[ "$WAS_RUNNING" == "1" ]]; then
-  open "$APP"
-  echo "Relaunched, because it was running before this build"
+  # When the watchdog agent owns the app, restart it through launchd so the
+  # surviving copy is the supervised one. Otherwise a plain open leaves an
+  # unsupervised copy and the agent idle.
+  AGENT="gui/$(id -u)/com.wiltonblake.drivepark.agent"
+  if launchctl print "$AGENT" >/dev/null 2>&1; then
+    launchctl kickstart -k "$AGENT" >/dev/null 2>&1 \
+      && echo "Restarted through the watchdog agent" \
+      || { open "$APP"; echo "Relaunched (agent kickstart failed)"; }
+  else
+    open "$APP"
+    echo "Relaunched, because it was running before this build"
+  fi
 fi
 
 echo "Built and installed: $APP"

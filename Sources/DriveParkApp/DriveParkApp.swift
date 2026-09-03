@@ -9,6 +9,12 @@ import DriveParkKit
 struct DriveParkApp: App {
     @StateObject private var state = AppState()
 
+    init() {
+        // Before anything else. Two copies means two menu bar icons and two
+        // things that each believe they hold the park veto.
+        if !SingleInstance.claim() { exit(0) }
+    }
+
     var body: some Scene {
         MenuBarExtra {
             MenuContent()
