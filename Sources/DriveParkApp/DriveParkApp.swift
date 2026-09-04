@@ -10,9 +10,34 @@ struct DriveParkApp: App {
     @StateObject private var state = AppState()
 
     init() {
-        // Before anything else. Two copies means two menu bar icons and two
-        // things that each believe they hold the park veto.
+        // Before anything else, and before SwiftUI builds a scene. launchd
+        // starts this same binary as the watchdog, and run() never returns, so
+        // that process puts nothing in the menu bar. One binary, two jobs, and
+        // they are never the same process. See Watchdog.swift for why the
+        // watchdog is not its own executable.
+        if AgentMode.isWatchdog { Watchdog.shared.run() }
+
+        // Two copies means two menu bar icons and two things that each believe
+        // they hold the park veto.
         if !SingleInstance.claim() { exit(0) }
+
+        // Every orderly termination is a deliberate one: the Quit menu item,
+        // Command-Q, an Apple Event from a script. The Quit button stamps this
+        // too, and stamping twice costs nothing, but the button is not the only
+        // way out and the watchdog must not resurrect an app a human closed.
+        //
+        // A crash, a kill -9, or a bundle replaced underneath the process runs
+        // none of this, which is exactly the case the watchdog exists for. The
+        // difference between "quit" and "died" is whether this line ran.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { _ in Preferences.noteQuitRequested() }
+        // An app update can change the watchdog agent, and launchd goes on
+        // running the definition it was given until somebody registers the
+        // new one. Nothing happens here in the ordinary case.
+        LoginItem.reconcile()
     }
 
     var body: some Scene {
@@ -678,7 +703,13 @@ struct MenuContent: View {
         }
         Divider()
         Button("Refresh") { state.refresh() }
-        Button("Quit DrivePark") { NSApp.terminate(nil) }
+        Button("Quit DrivePark") {
+            // Tell the watchdog this was deliberate before going. Without
+            // the stamp it does its job and brings the app straight back,
+            // which is what malware does.
+            Preferences.noteQuitRequested()
+            NSApp.terminate(nil)
+        }
             .keyboardShortcut("q")
     }
 }

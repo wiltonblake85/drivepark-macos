@@ -16,6 +16,8 @@
 // crash, or a bundle swapped out from under it is an abnormal exit, and only
 // those come back.
 
+import CryptoKit
+import DriveParkKit
 import Foundation
 import ServiceManagement
 
@@ -25,6 +27,59 @@ enum LoginItem {
 
     static var isEnabled: Bool { service.status == .enabled }
 
+    /// SHA-256 of the agent plist that currently sits in the bundle.
+    ///
+    /// launchd keeps the job definition it was handed at registration time.
+    /// Editing the plist inside the bundle changes nothing on its own, and a
+    /// kickstart runs the stale definition rather than the new one. Watched
+    /// happen on 2026-09-03: the plist on disk said DriveParkWatchdog,
+    /// backgroundtaskmanagementd had already read DriveParkWatchdog, and
+    /// launchd still reported
+    ///     program identifier = Contents/MacOS/DrivePark
+    /// so the kickstart restarted the app and the watchdog never ran.
+    private static var plistFingerprint: String? {
+        let url = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Library/LaunchAgents")
+            .appendingPathComponent(agentPlist)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Called once at launch. Re-registers when the bundled plist no longer
+    /// matches what launchd was given, which is every app update that changes
+    /// the agent, and does nothing at all in the ordinary case.
+    static func reconcile() {
+        guard let fingerprint = plistFingerprint else {
+            Preferences.recordDiagnostic("agentPlist", "missing from the bundle")
+            return
+        }
+
+        // Finish a migration that was interrupted last time. On the version
+        // this replaces, the app WAS the job, so the unregister below killed
+        // this process before the register could run.
+        if Preferences.agentReRegisterPending, service.status != .enabled {
+            try? service.register()
+            Preferences.registeredAgentFingerprint =
+                service.status == .enabled ? fingerprint : nil
+            Preferences.agentReRegisterPending = false
+            Preferences.recordDiagnostic("agentPlist", "re-registered after an interrupted update")
+            return
+        }
+
+        guard service.status == .enabled,
+              Preferences.registeredAgentFingerprint != fingerprint else { return }
+
+        Preferences.agentReRegisterPending = true
+        try? service.unregister()
+        try? service.register()
+        let settled = service.status == .enabled
+        Preferences.registeredAgentFingerprint = settled ? fingerprint : nil
+        Preferences.agentReRegisterPending = false
+        Preferences.recordDiagnostic(
+            "agentPlist", settled ? "re-registered on a changed plist" : "re-registration failed")
+    }
+
+
     /// Plain-language state, for the menu. The status enum matters more than
     /// the boolean: requiresApproval means the user switched DrivePark off in
     /// System Settings and only they can switch it back, which is not the same
@@ -32,7 +87,13 @@ enum LoginItem {
     static var statusDescription: String {
         switch service.status {
         case .enabled:
-            return "on"
+            // Registered is not the same as watched. The agent can be
+            // enabled while the watchdog process is dead, and a menu that
+            // reads "on" over a watchdog that is not running is the exact
+            // false assurance this app exists to refuse.
+            return Preferences.watchdogLooksAlive
+                ? "on"
+                : "on, but the watchdog is not answering"
         case .notRegistered:
             return "off"
         case .requiresApproval:
@@ -59,6 +120,9 @@ enum LoginItem {
         }
         // Verify against a fresh status read rather than trusting the call.
         let nowEnabled = service.status == .enabled
+        // Remember WHICH plist launchd was handed, so a later app update that
+        // changes it can tell that a re-registration is owed.
+        Preferences.registeredAgentFingerprint = nowEnabled ? plistFingerprint : nil
         if nowEnabled != on {
             return "System reports keep-running is \(statusDescription)."
         }

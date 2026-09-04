@@ -247,3 +247,105 @@ public enum Preferences {
         }
     }
 }
+
+
+// MARK: - The watchdog handshake
+//
+// Three pieces of state shared by the app, the watchdog and build-app.sh. They
+// live in this file rather than in the watchdog because all three processes
+// have to agree on them, and this file is the one place that guarantees they
+// are reading the same store. The 2026-09-01 bug where the CLI wrote to a
+// domain called "park" and the app never saw it is the reason that guarantee
+// is worth keeping in one place.
+
+extension Preferences {
+    private static let quitRequestedKey = "quitRequestedAt"
+    private static let watchdogPausedKey = "watchdogPausedUntil"
+    private static let watchdogHeartbeatKey = "watchdogHeartbeat"
+
+    /// A quit is honoured for ten seconds. Long enough to cover the app
+    /// actually going away, short enough that a stamp left behind by a crash
+    /// during shutdown cannot suppress a real rescue tomorrow.
+    public static let quitRequestHonoured: TimeInterval = 10
+
+    /// Called on the way out of a deliberate Quit, and nowhere else.
+    public static func noteQuitRequested() {
+        store.set(Date().timeIntervalSince1970, forKey: quitRequestedKey)
+        // Deprecated, and right here. The process is about to terminate and
+        // the watchdog reads this within milliseconds. The usual background
+        // flush does not reliably win that race.
+        store.synchronize()
+    }
+
+    public static var quitWasRequested: Bool {
+        let stamp = store.double(forKey: quitRequestedKey)
+        guard stamp > 0 else { return false }
+        return Date().timeIntervalSince1970 - stamp < quitRequestHonoured
+    }
+
+    public static func clearQuitRequest() {
+        store.removeObject(forKey: quitRequestedKey)
+    }
+
+    /// Set by build-app.sh while the bundle is being replaced, because the
+    /// watchdog would otherwise relaunch the app into a half-written bundle,
+    /// which is exactly how the app vanished with no crash report on
+    /// 2026-09-01. Written from the shell as a bare epoch, so it stays a
+    /// Double rather than a Date.
+    public static var watchdogPausedUntil: Date? {
+        get {
+            let stamp = store.double(forKey: watchdogPausedKey)
+            return stamp > 0 ? Date(timeIntervalSince1970: stamp) : nil
+        }
+        set {
+            if let newValue {
+                store.set(newValue.timeIntervalSince1970, forKey: watchdogPausedKey)
+            } else {
+                store.removeObject(forKey: watchdogPausedKey)
+            }
+        }
+    }
+
+    /// The watchdog ticks every 5 s, so twenty seconds of silence is dead
+    /// rather than briefly busy.
+    public static let watchdogStaleAfter: TimeInterval = 20
+
+    public static func recordWatchdogHeartbeat() {
+        store.set(Date().timeIntervalSince1970, forKey: watchdogHeartbeatKey)
+    }
+
+    /// What the menu reads to decide whether "on" is telling the truth.
+    public static var watchdogLooksAlive: Bool {
+        let stamp = store.double(forKey: watchdogHeartbeatKey)
+        guard stamp > 0 else { return false }
+        return Date().timeIntervalSince1970 - stamp < watchdogStaleAfter
+    }
+}
+
+extension Preferences {
+    private static let agentFingerprintKey = "registeredAgentFingerprint"
+    private static let agentPendingKey = "agentReRegisterPending"
+
+    /// The digest of the agent plist as it stood when launchd was last given
+    /// it. launchd keeps the definition it was handed at registration, so a
+    /// plist edited in the bundle changes nothing until the service is
+    /// registered again, and a kickstart in the meantime runs the old one.
+    public static var registeredAgentFingerprint: String? {
+        get { store.string(forKey: agentFingerprintKey) }
+        set {
+            if let newValue {
+                store.set(newValue, forKey: agentFingerprintKey)
+            } else {
+                store.removeObject(forKey: agentFingerprintKey)
+            }
+        }
+    }
+
+    /// Set across the unregister-then-register pair, because on the version
+    /// being migrated away from the unregister can kill this process before
+    /// the register runs. The next launch reads this and finishes the job.
+    public static var agentReRegisterPending: Bool {
+        get { store.bool(forKey: agentPendingKey) }
+        set { store.set(newValue, forKey: agentPendingKey); store.synchronize() }
+    }
+}

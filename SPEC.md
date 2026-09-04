@@ -1,4 +1,4 @@
-# DrivePark — v1 Engine Spec
+# DrivePark: v1 Engine Spec
 
 Name: DrivePark (settled 2026-09-01). CLI command: `park`. Date: 2026-08-31.
 Evidence base: live diagnostic session on mac-lan with a TerraMaster 3-bay DAS
@@ -277,3 +277,90 @@ consulted but not copied.
   scopes park/release to one disk. Remaining edge cases: partitionless
   "superfloppy" volumes, and APFS containers spanning multiple physical
   stores (Fusion-style).
+
+### Turning the watchdog off killed the app, 2026-09-03
+
+Wekesa flipped "Keep DrivePark running" and the menu bar icon disappeared. It
+never came back, and there was no crash report, because nothing crashed.
+
+The log is unambiguous:
+
+```
+12:18:19.681  agent [61239]  xpcproxy spawned with pid 61239
+12:19:16.419  DrivePark[61239] (AppKit) perform action for menu item
+12:19:16.439  agent [61239]  removing job: caller = smd
+12:19:16.443  agent [61239]  exited due to SIGTERM | sent by launchd[1]
+12:19:16.443  gui/501        removing service: com.wiltonblake.drivepark.agent
+```
+
+Twenty milliseconds from the click to `caller = smd`, which is
+`SMAppService.unregister()`. Four more to a dead process. The LaunchAgent's
+`BundleProgram` pointed at `Contents/MacOS/DrivePark`, so the running app was the
+job, and launchd removes a job by killing it. Switching the watchdog off killed
+the thing it was watching, every time, and no code could have caught it: the code
+that would have noticed was inside the process being killed.
+
+Two smaller defects rode along. The status verification in `setEnabled` sits after
+the `unregister()` call and was unreachable on that path, so a function whose own
+comment says never swallow the failure swallowed it by ending mid-body. And
+`SingleInstance.claim()` would have killed any replacement copy launched before
+the unregister, because that copy was unsupervised and saw the old one still
+alive.
+
+DrivePark also appears in `JetsamEvent-2026-09-03-121822.ips`, at 1930 resident
+pages, state active. That report snapshots all 777 live processes. Reading its
+presence there as the cause would repeat the 2026-09-01 error of asking what
+changed and answering with who changed it.
+
+**The fix, and the two versions of it that did not work.**
+
+First attempt: a separate `DriveParkWatchdog` executable in `Contents/MacOS`, with
+the agent pointed at it. It compiled, and run by hand it worked, printing
+`watching /Users/blake/Applications/DrivePark.app`. launchd refused to spawn it:
+
+```
+Could not find and/or execute program specified by service
+Service could not initialize: copy_bundle_path(...), error 0x6f
+last exit reason = OS_REASON_CODESIGNING
+LWCR = { signing-identifier => com.wiltonblake.drivepark,
+         team-identifier => 4G2DZU69L8, validation-category => 6 }
+```
+
+The job carries a launch requirement generated from the app that registered it. A
+nested helper signed under its own identifier fails that requirement. Signed under
+the app's identifier it fails code-signing validation instead. Both were tried.
+
+What ships is one binary in two modes. launchd sets `XPC_SERVICE_NAME` to the job
+label, so the agent-started process knows what it is and enters the watch loop
+before SwiftUI builds a scene, putting nothing in the menu bar. `BundleProgram`
+never changes, which means no installed copy has to be re-registered to receive
+the fix. Unregistering now kills a process that owns no window and holds no veto.
+
+**A third thing, found on the way.** The plist said `DriveParkWatchdog`,
+`backgroundtaskmanagementd` had read `DriveParkWatchdog`, and launchd still
+reported `program identifier = Contents/MacOS/DrivePark`. launchd keeps whatever
+job definition it was handed at registration; `launchctl kickstart` runs that
+stale one rather than the plist sitting on disk. `launchctl bootstrap` is no way
+out, since `BundleProgram` resolves only inside the SMAppService context and the
+call fails with an I/O error. So the app fingerprints its own agent plist now and
+re-registers when the digest changes. That covers every future update that
+touches the agent.
+
+**And a fourth, caught by the compiler.** `Watchdog()` was built as a temporary,
+so every `[weak self]` capture in the observer and the timer resolved to nil the
+moment `run()` was called. It would have reported for duty and watched nothing, in
+complete silence. It is a static now.
+
+**And a fifth, caught by the test.** Quit was implemented as a ten-second stamp.
+The watchdog read it, honoured it, cleared it, and five seconds later the poll
+found no stamp and relaunched an app a human had just closed. Quit is not a
+window, it is a state. The watchdog latches until it sees the app running again,
+and the stamp still expires so a stale one cannot wedge a fresh watchdog after a
+reboot, where launching the app is the right thing to do.
+
+**Regression suite, 7 of 7 on live hardware.** One UI copy and one watchdog with
+the agent running. The job removed while the app keeps its process id, which is
+the defect. `kill -9` on the app answered by a relaunch. An orderly quit that
+stays quit through later polls. A manual reopen that clears the stand-down and
+resumes the watch. Exactly one icon throughout. Count instances with `pgrep`, not
+by eye: two processes can render one visible icon while the menu bar refreshes.

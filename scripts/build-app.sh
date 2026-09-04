@@ -14,6 +14,15 @@
 # A Developer ID identity fixes both, and is required for notarization anyway.
 set -e
 cd "$(dirname "$0")/.."
+# Stand the watchdog down for the duration. Its whole job is to relaunch
+# DrivePark the moment the app disappears, and during this script the app
+# disappears on purpose and the bundle it would relaunch is briefly
+# half-written. Launching a half-written bundle is how the app vanished with no
+# crash report on 2026-09-01.
+DOMAIN="com.wiltonblake.drivepark"
+defaults write "$DOMAIN" watchdogPausedUntil -float $(( $(date +%s) + 300 ))
+trap 'defaults delete "$DOMAIN" watchdogPausedUntil 2>/dev/null || true' EXIT
+
 swift build -c release --product DriveParkApp
 APP="$HOME/Applications/DrivePark.app"
 
@@ -76,19 +85,19 @@ else
   echo "re-prompt on every build. Install a Developer ID certificate."
 fi
 
+# The agent runs this binary in watchdog mode, so it needs a kick to pick up
+# the new one. Independent of the app now: restarting the watchdog no longer
+# restarts, or kills, the copy showing the menu bar icon.
+AGENT="gui/$(id -u)/com.wiltonblake.drivepark.agent"
+if launchctl print "$AGENT" >/dev/null 2>&1; then
+  launchctl kickstart -k "$AGENT" >/dev/null 2>&1 \
+    && echo "Watchdog restarted on the new binary" \
+    || echo "WARNING: the watchdog agent would not restart"
+fi
+
 if [[ "$WAS_RUNNING" == "1" ]]; then
-  # When the watchdog agent owns the app, restart it through launchd so the
-  # surviving copy is the supervised one. Otherwise a plain open leaves an
-  # unsupervised copy and the agent idle.
-  AGENT="gui/$(id -u)/com.wiltonblake.drivepark.agent"
-  if launchctl print "$AGENT" >/dev/null 2>&1; then
-    launchctl kickstart -k "$AGENT" >/dev/null 2>&1 \
-      && echo "Restarted through the watchdog agent" \
-      || { open "$APP"; echo "Relaunched (agent kickstart failed)"; }
-  else
-    open "$APP"
-    echo "Relaunched, because it was running before this build"
-  fi
+  open "$APP"
+  echo "Relaunched, because it was running before this build"
 fi
 
 echo "Built and installed: $APP"
