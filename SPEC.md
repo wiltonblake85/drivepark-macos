@@ -427,3 +427,26 @@ record and then exits, so for a moment the store names a pid that is already
 gone. The liveness check is what covers it, which is the job it exists for, and
 teaching the CLI to predict its own lifetime would buy nothing the check does
 not already give.
+
+### Shortcut recorder, watched working, 2026-09-04
+
+Nobody had ever opened this panel. The code shipped, no one saw it run, and that
+is the same standing as not built. Driven through the menu with System Events on
+the tower:
+
+The menu item opens a panel titled DrivePark Shortcut carrying Save, Use Default
+and Cancel, and Save stays disabled until it captures something. Pressing ⌃⌥⌘K
+printed ⌃⌥⌘K in the preview and lit Save. Saving stored code 40, modifiers 6400,
+display ⌃⌥⌘K, and the app re-registered and reported no conflict.
+
+Then the part that matters, because a stored shortcut isn't a working one. With
+all three volumes mounted, the old ⌃⌥⌘P did nothing and status still read 3 of 3
+mounted. The newly recorded ⌃⌥⌘K parked all three and left the app holding the
+veto. Use Default put ⌃⌥⌘P back and re-registered it.
+
+**One path stays unverified, and this method can't reach it.** The guard that
+refuses a combination macOS already owns never fired, because System Events
+can't deliver a real system combination to the app. macOS claims it first, which
+is precisely the premise the guard rests on. Reaching it needs either a stubbed
+SystemShortcuts table or a combination the table lists that Wekesa has switched
+off in System Settings. Recorded here rather than counted as passing.
