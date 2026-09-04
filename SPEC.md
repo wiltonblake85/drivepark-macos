@@ -535,3 +535,56 @@ combination end to end through both halves, a rebind moves the claim rather than
 copying it, an override outside the curated table is still respected, Caps Lock
 bits are dropped before comparison, and a malformed plist entry is skipped
 rather than trapping.
+
+### Auto-release on wake, and the two defects it was hiding, 2026-09-04
+
+It never worked, and it had two separate reasons not to. Neither was visible
+from outside, because both failed silently.
+
+**The first ate the flag.** `parkedByTrigger` decides whether a wake remounts,
+and it lived in a `TriggerCoordinator` field. Any restart between the park and
+the wake reset it to false, and the wake then declined and said nothing. I
+watched it happen: a rebuild landed between a screen-lock park and the unlock,
+and the drives stayed down. A restart in that window isn't exotic, either. The
+watchdog relaunches after a crash and an update replaces the app, and those are
+exactly the moments when quietly forgetting to remount is worst. It persists
+now.
+
+**The second was worse, because it lied.** With the flag fixed, the diagnostics
+read `the screen unlocked: release running now` while the drives sat unmounted
+and the veto stayed armed. `AppState.release` opens with `guard !busy else {
+return }`, so a wake landing on top of a still-running park dropped the release
+on the floor, and `release(reason:)` set the message to "Remounted after the
+screen unlocked" either way. Drives parked, veto up, app reporting it had put
+them back. That's the precise thing this project exists to refuse, sitting in its own
+code.
+
+Release returns whether it ran now. The wake path waits its turn, six tries at
+five seconds, which covers the slow end of a measured park, and running out of
+tries says so instead of going quiet. It sets no message of its own: the release
+writes one when it finishes and has counted what actually mounted.
+
+**Verified end to end on the tower**, screen lock to unlock with no rebuild in
+between:
+
+```
+diag_wakeArm  screenLock park, parkedByTrigger set
+diag_wake     the screen unlocked: release started
+result        3 of 3 mounted, veto cleared, flag reset
+```
+
+**Getting there needed instrumentation, and that is the lasting part.** The first
+two attempts produced a wrong diagnosis each. The guard looked guilty and was
+innocent; then the notification looked dead and was fine. `PowerWatch` and the
+wake path now record what arrived and which of the three guards declined, so the
+next person who asks why nothing remounted gets an answer instead of an absence.
+
+### Safe to undock now goes out urgent, 2026-09-04
+
+Reported from the desk: Transom was holding the card. Filtering on VIPs, codes
+and urgent left the failure cards coming through and the success card held, which is backwards. The failure cards say keep your hands off, and doing nothing is the
+safe default anyone would take anyway. The success card is the only one you act
+on, and one that arrives after you've walked away is the same as no card.
+
+Both it and the partial-park card are urgent now. Still ten seconds rather than
+persistent: neither is a warning and neither should need dismissing.

@@ -113,6 +113,7 @@ public final class PowerWatch {
         }
 
         if messageType == Message.systemHasPoweredOn {
+            Preferences.recordDiagnostic("power", "hasPoweredOn at \(Date())")
             onDidWake?()
         }
     }

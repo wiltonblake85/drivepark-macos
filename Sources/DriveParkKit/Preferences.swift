@@ -200,6 +200,24 @@ public enum Preferences {
         set { store.set(newValue, forKey: includeImagesKey) }
     }
 
+    /// Whether the current park came from a trigger rather than a click.
+    ///
+    /// Persisted, because it decides whether the next wake remounts, and it
+    /// used to live only in a TriggerCoordinator field. Any restart between the
+    /// park and the wake reset it to false, and the wake then declined to
+    /// remount and said nothing: the drives stayed parked and the user was left
+    /// to work out why. Watched happen on 2026-09-04, when a rebuild landed
+    /// between a screen-lock park and the unlock.
+    ///
+    /// A restart in that window is not exotic. The watchdog relaunches after a
+    /// crash, and an update replaces the app, and both are exactly the moments
+    /// where quietly forgetting to remount is worst.
+    private static let parkedByTriggerKey = "parkedByTrigger"
+    public static var parkedByTrigger: Bool {
+        get { store.bool(forKey: parkedByTriggerKey) }
+        set { store.set(newValue, forKey: parkedByTriggerKey) }
+    }
+
     private static let ignoredKey = "ignoredVolumeUUIDs"
 
     /// Volumes DrivePark leaves alone. Nothing automatic touches them, and

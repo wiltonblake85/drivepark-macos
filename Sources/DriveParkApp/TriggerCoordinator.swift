@@ -24,7 +24,14 @@ final class TriggerCoordinator {
     private var pendingRelease: DispatchWorkItem?
 
     /// True only when the most recent park came from a trigger, not a click.
-    private(set) var parkedByTrigger = false
+    ///
+    /// Backed by preferences rather than a field, so it survives the app being
+    /// restarted between the park and the wake. See Preferences.parkedByTrigger
+    /// for what that cost on 2026-09-04.
+    var parkedByTrigger: Bool {
+        get { Preferences.parkedByTrigger }
+        set { Preferences.parkedByTrigger = newValue }
+    }
 
     weak var state: AppState?
 
@@ -93,6 +100,7 @@ final class TriggerCoordinator {
         DispatchQueue.global().asyncAfter(deadline: .now() + budget + 2) { allow() }
 
         parkedByTrigger = true
+        Preferences.recordDiagnostic("wakeArm", "systemSleep park, parkedByTrigger set")
         state.park(trigger: .systemSleep, deadline: deadline) { _ in allow() }
     }
 
@@ -101,16 +109,36 @@ final class TriggerCoordinator {
         guard !state.isParked else { return }
         pendingRelease?.cancel()
         parkedByTrigger = true
+        Preferences.recordDiagnostic("wakeArm", "\(trigger.rawValue) park, parkedByTrigger set")
         state.park(trigger: trigger, deadline: nil, completion: nil)
     }
 
     private func handleWake(reason: String) {
-        guard Preferences.autoReleaseOnWake, parkedByTrigger, state != nil else { return }
+        // Say why nothing happened. On 2026-09-04 a real sleep parked the tower
+        // and the wake released nothing, and there was no way to tell from
+        // outside whether the notification never arrived or a guard declined
+        // it. A trigger that silently does not fire is the failure this app
+        // exists to refuse, so it now reports which of the three it was.
+        guard Preferences.autoReleaseOnWake else {
+            Preferences.recordDiagnostic("wake", "\(reason): auto-release is off")
+            return
+        }
+        guard parkedByTrigger else {
+            Preferences.recordDiagnostic(
+                "wake", "\(reason): the park did not come from a trigger, leaving it parked")
+            return
+        }
+        guard state != nil else {
+            Preferences.recordDiagnostic("wake", "\(reason): no app state")
+            return
+        }
+        Preferences.recordDiagnostic("wake", "\(reason): releasing in \(Int(Preferences.wakeReleaseDelay))s")
         pendingRelease?.cancel()
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, let state = self.state else { return }
                 self.parkedByTrigger = false
+                Preferences.recordDiagnostic("wake", "\(reason): release running now")
                 state.release(reason: reason)
             }
         }

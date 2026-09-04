@@ -234,8 +234,16 @@ final class AppState: ObservableObject {
         runPark(only: only, deadline: nil, label: label, completion: nil)
     }
 
-    func release(only: Set<String>? = nil, label: String? = nil) {
-        guard !busy else { return }
+    /// - Returns: false when it declined because something else is running.
+    ///   Callers have to know, because a release that quietly does nothing is
+    ///   how the drives stayed parked after a wake on 2026-09-04.
+    @discardableResult
+    func release(only: Set<String>? = nil, label: String? = nil) -> Bool {
+        guard !busy else {
+            Preferences.recordDiagnostic(
+                "release", "declined: a park or release was already running")
+            return false
+        }
         busy = true
         message = "Remounting…"
         let engine = self.engine
@@ -256,6 +264,7 @@ final class AppState: ObservableObject {
                 }
             }
         }
+        return true
     }
 
     // MARK: - Trigger-driven actions
@@ -279,10 +288,44 @@ final class AppState: ObservableObject {
             : "Disk images are no longer counted."
     }
 
+    /// The wake path. Separate from the menu because a wake lands in the
+    /// middle of things, and the sleep park it is undoing may still be running.
+    ///
+    /// The old version called release once, ignored the answer, and set the
+    /// message to "Remounted after the Mac woke" whether or not anything had
+    /// been remounted. On 2026-09-04 that produced the worst possible pair: the
+    /// drives stayed unmounted, the veto stayed armed, and the app said it had
+    /// put them back. A tool that reports a remount it did not perform is
+    /// exactly the thing this project exists to refuse.
+    ///
+    /// So it waits its turn instead. Six tries at five seconds is half a
+    /// minute, which covers the slow end of a measured park, and running out
+    /// says so rather than going quiet.
     func release(reason: String) {
-        release(only: nil, label: nil)
-        message = "Remounted after \(reason)."
+        guard release(only: nil, label: nil) else {
+            wakeReleaseAttempts += 1
+            guard wakeReleaseAttempts <= 6 else {
+                wakeReleaseAttempts = 0
+                Preferences.recordDiagnostic(
+                    "wake", "\(reason): still busy after 6 tries, drives left parked")
+                message = "Could not remount after \(reason): something was still running."
+                return
+            }
+            Preferences.recordDiagnostic(
+                "wake", "\(reason): busy, retry \(wakeReleaseAttempts) in 5s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.release(reason: reason)
+            }
+            return
+        }
+        wakeReleaseAttempts = 0
+        // No message here on purpose. The release sets one when it finishes and
+        // has counted what actually mounted.
+        Preferences.recordDiagnostic("wake", "\(reason): release started")
     }
+
+    /// Bounded, so a permanently busy app cannot spin forever.
+    private var wakeReleaseAttempts = 0
 
     /// Runs a release asked for by `park release` in another process, then
     /// answers with what a fresh read actually found. The CLI is waiting on
@@ -413,12 +456,24 @@ final class AppState: ObservableObject {
                 Notifier.shared.post(
                     title: "Tower parked, safe to unplug",
                     body: "\(parkedNames.count) volume(s) verified unmounted in \(seconds).")
+                // Urgent, and it took a real complaint to get here. Wekesa
+                // runs Transom filtered to VIPs, codes and urgent, so this card
+                // was being held, which is the worst one to hold: it is the
+                // only card you ACT on. The failure cards tell you to keep your
+                // hands off, and doing nothing is the safe default you would
+                // have taken anyway. This is the one that says the waiting is
+                // over, and a "safe to undock" that arrives after you have
+                // already walked away is the same as no card at all.
+                //
+                // Still ten seconds rather than persistent. It is not a warning
+                // and it should not need dismissing.
                 Transom.post(
                     title: "Safe to undock",
                     message: "\(parkedNames.count) volume(s) verified unmounted in \(seconds). "
                         + "Pull the cable.",
                     symbol: "externaldrive.badge.checkmark",
-                    duration: 10)
+                    duration: 10,
+                    urgent: true)
                 // The one sound that means "pull the cable". Nothing else uses it.
                 Chime.safeToUnplug.play()
             } else {
@@ -448,7 +503,8 @@ final class AppState: ObservableObject {
                 message: "\(mountedCount) of \(volumes.count) volumes still mounted. "
                     + "Not safe to undock yet.",
                 symbol: "externaldrive",
-                duration: 10)
+                duration: 10,
+                urgent: true)
             Chime.partial.play()
         }
     }
