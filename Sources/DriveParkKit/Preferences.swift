@@ -39,6 +39,13 @@ public enum Preferences {
     /// fallback lands both processes in the same place.
     public static let domain = "com.wiltonblake.drivepark"
     private static let store = UserDefaults(suiteName: domain) ?? .standard
+
+    /// Raw access to the one store, for the few collaborators that need to
+    /// read and write keys this file does not model. VetoBroker is the only
+    /// one today. Everything else goes through the typed accessors below,
+    /// because the whole point of the paragraph above is that there is
+    /// exactly one store and nobody re-derives it.
+    public static var sharedStore: UserDefaults { store }
     private static let triggersKey = "enabledTriggers"
     private static let autoReleaseKey = "autoReleaseOnWake"
     private static let wakeDelayKey = "wakeReleaseDelay"

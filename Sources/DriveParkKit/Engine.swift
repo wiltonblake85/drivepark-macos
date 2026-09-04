@@ -223,6 +223,10 @@ public final class Engine {
 
         if stillMounted.isEmpty && !results.isEmpty {
             parkedVolumeUUIDs.formUnion(vetoUUIDs)
+            // Say out loud who is holding it. The veto lives in this process's
+            // memory and no other process can lift it, so a second process
+            // needs to be able to find out that this one exists.
+            VetoBroker.publishHold(parkedVolumeUUIDs)
         } else if stillMounted.isEmpty && results.isEmpty {
             notes.append("Nothing to park: no managed volume was mounted. Veto left as it was.")
         }
@@ -247,6 +251,7 @@ public final class Engine {
                 }
             }
         }
+        VetoBroker.publishHold(parkedVolumeUUIDs)
         for disk in disks {
             for volume in disk.allVolumes
             where !volume.isMounted && !Preferences.isIgnored(volume.uuid) {

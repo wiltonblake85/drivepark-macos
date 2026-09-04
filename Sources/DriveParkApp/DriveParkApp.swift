@@ -33,7 +33,24 @@ struct DriveParkApp: App {
             forName: NSApplication.willTerminateNotification,
             object: nil,
             queue: .main
-        ) { _ in Preferences.noteQuitRequested() }
+        ) { _ in
+            Preferences.noteQuitRequested()
+            // The veto dies with this process, so the record of it must not
+            // outlive it. A stale holder would make `park release` wait on an
+            // answer from a pid that is gone.
+            VetoBroker.clearHold()
+        }
+
+        // `park release` cannot lift a veto this process holds, because Disk
+        // Arbitration dissent comes from the process that registered the
+        // callback. So the CLI asks, and this is the ear. See VetoBroker.
+        DistributedNotificationCenter.default().addObserver(
+            forName: VetoBroker.releaseRequested,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in AppState.shared?.serveReleaseRequest() }
+        }
         // An app update can change the watchdog agent, and launchd goes on
         // running the definition it was given until somebody registers the
         // new one. Nothing happens here in the ordinary case.
@@ -52,6 +69,11 @@ struct DriveParkApp: App {
 
 @MainActor
 final class AppState: ObservableObject {
+    /// Set once at init so the cross-process release request has something to
+    /// call. The app is a single instance by construction (SingleInstance), so
+    /// there is never a second one to point at.
+    static weak var shared: AppState?
+
     @Published var disks: [PhysicalDisk] = []
     @Published var busy = false
     @Published var message = ""
@@ -92,6 +114,7 @@ final class AppState: ObservableObject {
     private var timer: Timer?
 
     init() {
+        AppState.shared = self
         refresh()
         Notifier.shared.requestAuthorizationIfNeeded()
         applyHotKey()
@@ -247,6 +270,35 @@ final class AppState: ObservableObject {
     func release(reason: String) {
         release(only: nil, label: nil)
         message = "Remounted after \(reason)."
+    }
+
+    /// Runs a release asked for by `park release` in another process, then
+    /// answers with what a fresh read actually found. The CLI is waiting on
+    /// that answer and will report a timeout rather than assume, so an
+    /// unanswered request has to look like an unanswered request.
+    func serveReleaseRequest() {
+        guard let request = VetoBroker.pendingRequest() else { return }
+        VetoBroker.consumeRequest()
+        // Answer the doorbell before doing the work, so the CLI waits
+        // instead of concluding that nobody is home.
+        VetoBroker.acknowledge(nonce: request.nonce)
+        busy = true
+        message = "Remounting, asked by the command line…"
+        let engine = self.engine
+        Task.detached {
+            let (mounted, total) = engine.release(onlyDisks: request.disks)
+            let found = engine.discover()
+            VetoBroker.answer(nonce: request.nonce, mounted: mounted, total: total)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.disks = found
+                self.lastVerifiedAt = Date()
+                self.busy = false
+                self.message = mounted == total
+                    ? "All volumes back online, asked by the command line."
+                    : "\(mounted) of \(total) volumes mounted."
+            }
+        }
     }
 
     private func runPark(only: Set<String>?, deadline: Date?, label: String?,

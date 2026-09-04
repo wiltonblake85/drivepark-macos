@@ -364,3 +364,66 @@ the defect. `kill -9` on the app answered by a relaunch. An orderly quit that
 stays quit through later polls. A manual reopen that clears the stand-down and
 resumes the watch. Exactly one icon throughout. Count instances with `pgrep`, not
 by eye: two processes can render one visible icon while the menu bar refreshes.
+
+### `park release` can now clear a veto the app holds, 2026-09-04
+
+Open since 2026-09-03, and the last item in this file that broke a promise
+rather than leaving one unverified.
+
+The veto is a Disk Arbitration mount-approval callback registered on a DASession
+and gated by `parkedVolumeUUIDs`. Both live in one process's memory, and that is
+not an implementation detail that can be factored away: DA dissent comes from
+the process that registered the callback. `park release` in a second process was
+clearing its own empty copy of the set, attempting a mount, catching the app's
+own dissent string, and printing it. It told the exact truth and offered no way
+out.
+
+So the holder publishes the fact that it is holding, and a release is now a
+message to the holder rather than a reach into its memory. `VetoBroker` carries
+the state in the shared preferences suite and rings a distributed notification
+as a doorbell. Three things fall out of that:
+
+`park status` names the holder by process and pid. A `park now --hold` in
+another terminal holds a real veto and listens for nothing, so the CLI says so
+and points at the Ctrl-C rather than pretending it can help.
+
+The holder record carries a pid and is checked for liveness on every read. A
+veto dies with the process that registered it, so a record left behind by a
+crash describes a hold that no longer exists, and acting on it would block a
+release that would otherwise have worked. Confirmed by test: after the holding
+process was killed, the next `park status` stopped naming it and swept the
+record.
+
+The requester never assumes. It reads the answer back, and an unanswered request
+is reported as unanswered.
+
+**The wrong answer this produced first, and the fix for it.** The first version
+had one signal doing two jobs. A remount of three volumes took longer than the
+fifteen second wait, so the CLI printed "DrivePark did not answer, the veto is
+still up" while the app was mid-remount, and the answer landed seconds later
+reading 3 of 3 mounted. The stored answer key was the proof:
+
+```
+{ mounted = 3; nonce = "1696670A-CAE6-4975-8040-30BC6ABD0FFB"; total = 3; }
+```
+
+Being early is not the same as being ignored, and a drive tool that confuses
+them tells the user the opposite of the truth. There are two acknowledgements
+now. The holder writes an ack the instant it picks the request up, before it
+starts work, and the CLI waits five seconds for that. Then it waits up to three
+minutes for the result, saying that it is waiting. Past three minutes it refuses
+to guess which way it went and sends you to `park status`, which reads the disks
+instead of the conversation.
+
+**Verified on the tower, both branches.** With `park now --hold` holding, status
+named `park` and its pid, `park release` refused and pointed at the Ctrl-C, and
+killing the holder swept the record. With the app holding after a park driven by
+its own global shortcut, status named `DrivePark` and its pid, and `park
+release` printed the handover and then 3 of 3 mounted, which a fresh read
+confirmed.
+
+One rough edge left on purpose. `park now` without `--hold` publishes a holder
+record and then exits, so for a moment the store names a pid that is already
+gone. The liveness check is what covers it, which is the job it exists for, and
+teaching the CLI to predict its own lifetime would buy nothing the check does
+not already give.
