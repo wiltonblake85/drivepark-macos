@@ -10,11 +10,11 @@
 // that would drift with every macOS release and every person who rebinds
 // something.
 
-import AppKit
 import Carbon.HIToolbox
+import Foundation
 
-enum SystemShortcuts {
-    private struct Combination: Equatable {
+public enum SystemShortcuts {
+    struct Combination: Equatable {
         let keyCode: UInt32
         /// Cocoa modifier mask, matching what the preferences plist stores.
         let modifiers: UInt32
@@ -30,10 +30,15 @@ enum SystemShortcuts {
     /// actually customised. It is curated rather than exhaustive: the aim is
     /// to catch the combinations someone might plausibly reach for, not to
     /// mirror every key in System Settings.
-    private static let cmd = UInt32(NSEvent.ModifierFlags.command.rawValue)
-    private static let opt = UInt32(NSEvent.ModifierFlags.option.rawValue)
-    private static let ctrl = UInt32(NSEvent.ModifierFlags.control.rawValue)
-    private static let shift = UInt32(NSEvent.ModifierFlags.shift.rawValue)
+    /// Cocoa modifier masks, written out rather than taken from
+    /// NSEvent.ModifierFlags. They are fixed bit positions that
+    /// com.apple.symbolichotkeys stores directly, and spelling them here means
+    /// this file needs no AppKit, so the CLI that links this library does not
+    /// drag a UI framework in for four numbers.
+    static let shift: UInt32 = 1 << 17
+    static let ctrl: UInt32 = 1 << 18
+    static let opt: UInt32 = 1 << 19
+    static let cmd: UInt32 = 1 << 20
 
     private static var systemDefaults: [Int: (Combination, String)] {
         [
@@ -66,7 +71,20 @@ enum SystemShortcuts {
     /// The name of what already owns this combination, or nil when nothing
     /// known does. A nil is not a promise that the shortcut will fire, only
     /// that nothing in this table objects.
-    static func owner(keyCode: UInt32, carbonModifiers: UInt32) -> String? {
+    public static func owner(keyCode: UInt32, carbonModifiers: UInt32) -> String? {
+        owner(keyCode: keyCode, carbonModifiers: carbonModifiers,
+              overrides: userOverrides())
+    }
+
+    /// The decision, separated from reading this Mac's live configuration.
+    ///
+    /// The split exists because the alert this feeds cannot be reached by
+    /// pressing keys. Every combination it would fire on is claimed by macOS
+    /// or by AppKit before the recorder's capture view sees it, and five were
+    /// tried on 2026-09-04 without one arriving. So the table comes in as an
+    /// argument, and the branch gets tested here rather than never.
+    static func owner(keyCode: UInt32, carbonModifiers: UInt32,
+                      overrides: [Int: Combination?]) -> String? {
         let wanted = Combination(keyCode: keyCode,
                                  modifiers: cocoaMask(from: carbonModifiers))
 
@@ -74,7 +92,6 @@ enum SystemShortcuts {
             return name
         }
 
-        let overrides = userOverrides()
         for (identifier, entry) in systemDefaults {
             // A user override replaces the default entirely, and can disable it.
             if let override = overrides[identifier] {
@@ -94,11 +111,22 @@ enum SystemShortcuts {
     }
 
     /// Identifier to combination, or to nil when the user disabled it.
-    private static func userOverrides() -> [Int: Combination?] {
+    static func userOverrides() -> [Int: Combination?] {
         guard let store = UserDefaults(suiteName: "com.apple.symbolichotkeys"),
               let table = store.dictionary(forKey: "AppleSymbolicHotKeys")
         else { return [:] }
 
+        return parseOverrides(table)
+    }
+
+    /// The parsing, split from the reading.
+    ///
+    /// Split on 2026-09-04 after a mutation test proved the first version of
+    /// these tests could not fail. They handed `owner` a table that was
+    /// already built, so breaking the enabled check in here changed nothing
+    /// and the suite still went green. A test that cannot go red is
+    /// decoration, and this is the half that reads a real plist.
+    static func parseOverrides(_ table: [String: Any]) -> [Int: Combination?] {
         var result: [Int: Combination?] = [:]
         for (rawIdentifier, rawEntry) in table {
             guard let identifier = Int(rawIdentifier),

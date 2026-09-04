@@ -508,3 +508,30 @@ entirely, so a system shortcut you've switched off is correctly freed up.
 
 Reaching the alert needs a stubbed SystemShortcuts table, which means a test
 target and moving that file into DriveParkKit. Recorded as open rather than counted as passing.
+
+### A test target, and a mutation that caught the tests lying, 2026-09-04
+
+`SystemShortcuts` now lives in DriveParkKit behind a test target, so the
+conflict guard's decision runs where keystrokes cannot go. AppKit went with it:
+the file used that framework for four modifier masks, which are fixed bit
+positions. Spelling them out means the CLI that links this library no longer
+drags in a UI framework for four numbers.
+
+Eight tests went green on the first run. Then I broke the enabled check in the
+override parser on purpose, and all eight still passed.
+
+They were testing nothing. Every one of them handed the decision a table that
+was already built, so the parser, which is where "the user switched this off in
+System Settings" actually gets decided, had no coverage at all. I had read that
+parser by eye an hour earlier and called it correct, which is not testing it.
+
+So I split the parse out from the read and put six tests on the parser. The
+same mutation now produces two failures. Fourteen tests, and the suite can go
+red, which is the only property that makes green mean anything.
+
+Covered now: the shipped default is unclaimed, Spotlight is claimed from the
+defaults table, Command Tab beats an empty table, a disabled entry frees its
+combination end to end through both halves, a rebind moves the claim rather than
+copying it, an override outside the curated table is still respected, Caps Lock
+bits are dropped before comparison, and a malformed plist entry is skipped
+rather than trapping.

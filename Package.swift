@@ -7,6 +7,8 @@ let package = Package(
     targets: [
         .target(name: "DriveParkKit", path: "Sources/DriveParkKit"),
         .executableTarget(name: "park", dependencies: ["DriveParkKit"], path: "Sources/park"),
+        .testTarget(name: "DriveParkKitTests", dependencies: ["DriveParkKit"],
+                    path: "Tests/DriveParkKitTests"),
         .executableTarget(name: "DriveParkApp", dependencies: ["DriveParkKit"], path: "Sources/DriveParkApp")
     ]
 )
