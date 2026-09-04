@@ -89,6 +89,7 @@ final class AppState: ObservableObject {
     @Published var autoReleaseOnWake: Bool = Preferences.autoReleaseOnWake
     @Published var launchAtLogin: Bool = LoginItem.isEnabled
     @Published var ignoredUUIDs: Set<String> = Preferences.ignoredVolumeUUIDs
+    @Published var includeDiskImages: Bool = Preferences.includeDiskImages
     /// Live progress while a park runs. Counting up, never down: the measured
     /// unmount time is bimodal, half a second or eleven, so a countdown would
     /// be wrong a third of the time and you would learn to distrust it.
@@ -265,6 +266,17 @@ final class AppState: ObservableObject {
               completion: ((ParkOutcome?) -> Void)?) {
         runPark(only: nil, deadline: deadline, label: nil,
                 triggerLabel: trigger.reason, completion: completion)
+    }
+
+    func setIncludeDiskImages(_ on: Bool) {
+        Preferences.includeDiskImages = on
+        includeDiskImages = on
+        // Discovery changes shape, so what is on screen is now stale. Re-read
+        // rather than leaving the old list looking current.
+        refresh()
+        message = on
+            ? "Disk images are now parkable drives."
+            : "Disk images are no longer counted."
     }
 
     func release(reason: String) {
@@ -702,6 +714,13 @@ struct MenuContent: View {
         Divider()
         Menu("Drives") {
             Text("Unchecked drives are never touched, including by Park Tower")
+            Divider()
+            Toggle("Include mounted disk images", isOn: Binding(
+                get: { state.includeDiskImages },
+                set: { state.setIncludeDiskImages($0) }))
+            Text(state.includeDiskImages
+                 ? "A .dmg now counts, so Park Tower waits for it too"
+                 : "A .dmg being open will not change the safe-to-unplug answer")
             Divider()
             ForEach(state.allVolumes, id: \.device) { volume in
                 Toggle(volume.displayName.isEmpty ? volume.device : volume.displayName,

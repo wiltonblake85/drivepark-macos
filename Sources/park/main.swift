@@ -57,6 +57,10 @@ func printStatus() {
         print("")
     }
 
+    if Preferences.includeDiskImages {
+        print("Disk images are included in this listing (park images off to exclude).")
+        print("")
+    }
     if total == 0 {
         print("Overall: no volumes discovered.")
     } else if mounted == 0 {
@@ -267,6 +271,30 @@ case "ignore", "manage":
     print(wantIgnored
         ? "\"\(match.displayName)\" is now IGNORED. DrivePark will not unmount it, including on Park Tower."
         : "\"\(match.displayName)\" is managed again.")
+case "images":
+    // park images            -> show
+    // park images on | s.f   -> set
+    let want = arguments.dropFirst().first?.lowercased()
+    if let want {
+        guard want == "on" || want == "off" else {
+            print("usage: park images [on|off]")
+            exit(64)
+        }
+        Preferences.includeDiskImages = (want == "on")
+    }
+    if Preferences.includeDiskImages {
+        print("Disk images: INCLUDED. A mounted .dmg counts as a parkable drive,")
+        print("so Park Tower unmounts it and the safe-to-unplug answer waits for it.")
+    } else {
+        print("Disk images: excluded. A mounted .dmg is left alone and does not")
+        print("change the safe-to-unplug answer. This is the default.")
+    }
+    if ProcessInfo.processInfo.environment["PARK_INCLUDE_VIRTUAL"] == "1" {
+        print("")
+        print("NOTE: PARK_INCLUDE_VIRTUAL=1 is set in this environment and forces")
+        print("them in regardless of the setting above.")
+    }
+
 case "triggers":
     print("AUTOMATIC PARKING\n")
     print(appLivenessLine())

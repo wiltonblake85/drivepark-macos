@@ -144,18 +144,42 @@ public func formatSize(_ bytes: Int64) -> String {
 }
 
 public func discoverExternalDisks() -> [PhysicalDisk] {
-    // PARK_INCLUDE_VIRTUAL=1 includes attached disk images, used for
-    // filesystem tests without real hardware.
-    let includeVirtual = ProcessInfo.processInfo.environment["PARK_INCLUDE_VIRTUAL"] == "1"
-    let listArguments = includeVirtual
-        ? ["list", "-plist", "external"]
-        : ["list", "-plist", "external", "physical"]
+    // Disk images are opt-in, and dropping `physical` is NOT how you opt in.
+    //
+    // Measured on the tower 2026-09-04: `diskutil list external physical`
+    // returns 3 whole disks, and `diskutil list external` returns 22. Only two
+    // of the extra nineteen are disk images. The rest are the APFS synthesized
+    // containers that the loop further down already maps back to their physical
+    // stores, so admitting them as whole disks would count every volume twice
+    // and offer to eject a container.
+    //
+    // So the wide list is a candidate list, not an answer. Each candidate is
+    // kept only if diskutil calls it a Disk Image, which costs nothing extra
+    // because the info call below already runs for every disk.
+    //
+    // `external` itself is never relaxed. It is the one thing keeping the boot
+    // disk out of a tool that unmounts volumes, and on this Mac the internal
+    // SSD reports Device Location: Internal.
+    //
+    // PARK_INCLUDE_VIRTUAL=1 still forces it on, because the filesystem tests
+    // and the manage-list work run against scratch images and predate the
+    // setting.
+    let includeImages = Preferences.includeDiskImages
+        || ProcessInfo.processInfo.environment["PARK_INCLUDE_VIRTUAL"] == "1"
+
     DiskutilTimeout.reset()
-    guard let externalList = runDiskutil(listArguments),
-          let externalWhole = externalList["WholeDisks"] as? [String] else {
+    guard let physicalList = runDiskutil(["list", "-plist", "external", "physical"]),
+          let physicalWhole = physicalList["WholeDisks"] as? [String] else {
         return []
     }
-    let externalSet = Set(externalWhole)
+    var externalSet = Set(physicalWhole)
+    var imageCandidates: Set<String> = []
+    if includeImages,
+       let wideList = runDiskutil(["list", "-plist", "external"]),
+       let wideWhole = wideList["WholeDisks"] as? [String] {
+        imageCandidates = Set(wideWhole).subtracting(externalSet)
+        externalSet.formUnion(imageCandidates)
+    }
 
     guard let fullList = runDiskutil(["list", "-plist"]),
           let allEntries = fullList["AllDisksAndPartitions"] as? [[String: Any]]
@@ -174,6 +198,14 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
             disk.ejectable = info["Ejectable"] as? Bool ?? false
         } else {
             disk.infoAnswered = false
+        }
+        // A candidate from the wide list earns its place only by being a real
+        // disk image. Anything else there is a synthesized container, and an
+        // enclosure that will not answer an info query is not evidence of
+        // either, so it does not get the benefit of the doubt.
+        if imageCandidates.contains(device),
+           !(disk.infoAnswered && disk.busProtocol == "Disk Image") {
+            continue
         }
         disks[device] = disk
     }

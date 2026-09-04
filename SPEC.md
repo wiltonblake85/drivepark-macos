@@ -450,3 +450,61 @@ can't deliver a real system combination to the app. macOS claims it first, which
 is precisely the premise the guard rests on. Reaching it needs either a stubbed
 SystemShortcuts table or a combination the table lists that Wekesa has switched
 off in System Settings. Recorded here rather than counted as passing.
+
+### Disk images get a real switch, 2026-09-04
+
+Last v0.2 parity item. `PARK_INCLUDE_VIRTUAL=1` had been doing this job since
+the filesystem tests, and an environment variable is not a setting.
+
+**Dropping `physical` is not how you opt in.** Measured on the tower:
+`diskutil list external physical` returns 3 whole disks and `diskutil list
+external` returns 22. Only sixteen of the extra nineteen are disk images. The
+other three are disk8, disk9 and disk11, the APFS synthesized containers for the
+tower itself, which discovery already maps back to their physical stores.
+Admitting those as whole disks would count every volume on the tower twice and
+offer to eject a container.
+
+So the wide list is a candidate list. Each candidate survives only if diskutil
+calls its protocol Disk Image, which costs no extra process launch because the
+info call already runs for every disk. An enclosure that won't answer an info query
+doesn't get the benefit of the doubt, because an unanswered query isn't evidence
+of anything.
+
+`external` itself is never relaxed. It is the one thing keeping the boot disk
+out of a tool whose whole job is unmounting volumes, and on this Mac the
+internal SSD reports Device Location: Internal.
+
+Off by default. Whether it's safe to unplug the enclosure shouldn't change
+because a .dmg happens to be open. `park images [on|off]` in the CLI, a toggle
+under Drives in the menu, and `park status` says so in the listing so a volume count is never unexplained. Verified: 3 disks off, 19 on, 3 off again, set from
+the menu and read back by the CLI and the reverse, and the env variable still
+forces it regardless of the setting.
+
+**SD cards are not covered and were not guessed at.** A card in a USB reader is
+already an external physical disk and always worked. A card in a built-in slot
+reports Device Location: Internal on some Macs, so covering it means relaxing
+the one guard that keeps the boot disk out, filtered on a Secure Digital
+protocol string that can't be tested here: this Mac has no built-in reader,
+only Apple Fabric internal and USB. Shipping that blind isn't worth it.
+
+### The shortcut conflict guard still cannot be reached, 2026-09-04
+
+Five combinations tried through the recorder panel, and none of them reach the alert:
+
+`⌃←`, `⌃Space` and `⌥⌘D` are consumed by macOS before the app sees them, which
+is exactly the premise the guard rests on. `⌘W` closes the panel, and `⌘Q` would
+quit, because AppKit handles both as window and application commands before
+keyDown reaches the capture view. So the two entries in `alwaysReserved` that
+macOS doesn't consume are unreachable through the UI too, by a different
+mechanism.
+
+That last one is a small rough edge in its own right: pressing ⌘W in the
+recorder closes the panel with no explanation rather than telling you the
+combination is spoken for.
+
+I read the overlay parser rather than assuming it, and it's correct: an entry
+with enabled false becomes a nil override, and a nil override skips the default
+entirely, so a system shortcut you've switched off is correctly freed up.
+
+Reaching the alert needs a stubbed SystemShortcuts table, which means a test
+target and moving that file into DriveParkKit. Recorded as open rather than counted as passing.

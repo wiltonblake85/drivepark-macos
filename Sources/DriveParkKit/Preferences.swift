@@ -191,6 +191,15 @@ public enum Preferences {
 
     // MARK: - The manage list
 
+    /// Whether mounted disk images count as parkable drives. Off by default,
+    /// because the answer to "is it safe to unplug the enclosure" should not
+    /// change because a .dmg happens to be open.
+    private static let includeImagesKey = "includeDiskImages"
+    public static var includeDiskImages: Bool {
+        get { store.bool(forKey: includeImagesKey) }
+        set { store.set(newValue, forKey: includeImagesKey) }
+    }
+
     private static let ignoredKey = "ignoredVolumeUUIDs"
 
     /// Volumes DrivePark leaves alone. Nothing automatic touches them, and
