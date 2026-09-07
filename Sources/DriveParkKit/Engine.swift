@@ -234,12 +234,12 @@ public final class Engine {
                            notes: notes, timing: timing)
     }
 
-    public func release(onlyDisks: Set<String>? = nil,
-                        progress: (String) -> Void = { _ in }) -> (mounted: Int, total: Int) {
+    public func mount(onlyDisks: Set<String>? = nil,
+                      progress: (String) -> Void = { _ in }) -> (mounted: Int, total: Int) {
         guard let ops else { return (0, 0) }
         let disks = discoverExternalDisks()
             .filter { onlyDisks?.contains($0.device) ?? true }
-        // Drop the veto for exactly what is being released.
+        // Drop the veto for exactly what is being mounted.
         if onlyDisks == nil {
             parkedVolumeUUIDs = []
         } else {

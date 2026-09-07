@@ -1,5 +1,5 @@
 // DriveParkApp — menu bar app over DriveParkKit. While this app runs after a
-// full park, the remount veto stays armed; Release drops it and remounts.
+// full park, the remount veto stays armed; Mount drops it and remounts.
 
 import SwiftUI
 import AppKit
@@ -36,20 +36,20 @@ struct DriveParkApp: App {
         ) { _ in
             Preferences.noteQuitRequested()
             // The veto dies with this process, so the record of it must not
-            // outlive it. A stale holder would make `park release` wait on an
+            // outlive it. A stale holder would make `park mount` wait on an
             // answer from a pid that is gone.
             VetoBroker.clearHold()
         }
 
-        // `park release` cannot lift a veto this process holds, because Disk
+        // `park mount` cannot lift a veto this process holds, because Disk
         // Arbitration dissent comes from the process that registered the
         // callback. So the CLI asks, and this is the ear. See VetoBroker.
         DistributedNotificationCenter.default().addObserver(
-            forName: VetoBroker.releaseRequested,
+            forName: VetoBroker.mountRequested,
             object: nil,
             queue: .main
         ) { _ in
-            Task { @MainActor in AppState.shared?.serveReleaseRequest() }
+            Task { @MainActor in AppState.shared?.serveMountRequest() }
         }
         // An app update can change the watchdog agent, and launchd goes on
         // running the definition it was given until somebody registers the
@@ -69,7 +69,7 @@ struct DriveParkApp: App {
 
 @MainActor
 final class AppState: ObservableObject {
-    /// Set once at init so the cross-process release request has something to
+    /// Set once at init so the cross-process mount request has something to
     /// call. The app is a single instance by construction (SingleInstance), so
     /// there is never a second one to point at.
     static weak var shared: AppState?
@@ -86,7 +86,7 @@ final class AppState: ObservableObject {
 
     // Mirrors of persisted preferences, so SwiftUI sees the changes.
     @Published var enabledTriggers: Set<ParkTrigger> = Preferences.enabledTriggers
-    @Published var autoReleaseOnWake: Bool = Preferences.autoReleaseOnWake
+    @Published var autoMountOnWake: Bool = Preferences.autoMountOnWake
     @Published var launchAtLogin: Bool = LoginItem.isEnabled
     @Published var ignoredUUIDs: Set<String> = Preferences.ignoredVolumeUUIDs
     @Published var includeDiskImages: Bool = Preferences.includeDiskImages
@@ -235,20 +235,20 @@ final class AppState: ObservableObject {
     }
 
     /// - Returns: false when it declined because something else is running.
-    ///   Callers have to know, because a release that quietly does nothing is
+    ///   Callers have to know, because a mount that quietly does nothing is
     ///   how the drives stayed parked after a wake on 2026-09-04.
     @discardableResult
-    func release(only: Set<String>? = nil, label: String? = nil) -> Bool {
+    func mount(only: Set<String>? = nil, label: String? = nil) -> Bool {
         guard !busy else {
             Preferences.recordDiagnostic(
-                "release", "declined: a park or release was already running")
+                "mount", "declined: a park or mount was already running")
             return false
         }
         busy = true
-        message = "Remounting…"
+        message = "Mounting…"
         let engine = self.engine
         Task.detached {
-            let (mounted, total) = engine.release(onlyDisks: only)
+            let (mounted, total) = engine.mount(onlyDisks: only)
             let found = engine.discover()
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -291,7 +291,7 @@ final class AppState: ObservableObject {
     /// The wake path. Separate from the menu because a wake lands in the
     /// middle of things, and the sleep park it is undoing may still be running.
     ///
-    /// The old version called release once, ignored the answer, and set the
+    /// The old version called mount once, ignored the answer, and set the
     /// message to "Remounted after the Mac woke" whether or not anything had
     /// been remounted. On 2026-09-04 that produced the worst possible pair: the
     /// drives stayed unmounted, the veto stayed armed, and the app said it had
@@ -301,47 +301,47 @@ final class AppState: ObservableObject {
     /// So it waits its turn instead. Six tries at five seconds is half a
     /// minute, which covers the slow end of a measured park, and running out
     /// says so rather than going quiet.
-    func release(reason: String) {
-        guard release(only: nil, label: nil) else {
-            wakeReleaseAttempts += 1
-            guard wakeReleaseAttempts <= 6 else {
-                wakeReleaseAttempts = 0
+    func mount(reason: String) {
+        guard mount(only: nil, label: nil) else {
+            wakeMountAttempts += 1
+            guard wakeMountAttempts <= 6 else {
+                wakeMountAttempts = 0
                 Preferences.recordDiagnostic(
                     "wake", "\(reason): still busy after 6 tries, drives left parked")
-                message = "Could not remount after \(reason): something was still running."
+                message = "Could not mount after \(reason): something was still running."
                 return
             }
             Preferences.recordDiagnostic(
-                "wake", "\(reason): busy, retry \(wakeReleaseAttempts) in 5s")
+                "wake", "\(reason): busy, retry \(wakeMountAttempts) in 5s")
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-                self?.release(reason: reason)
+                self?.mount(reason: reason)
             }
             return
         }
-        wakeReleaseAttempts = 0
-        // No message here on purpose. The release sets one when it finishes and
+        wakeMountAttempts = 0
+        // No message here on purpose. The mount sets one when it finishes and
         // has counted what actually mounted.
-        Preferences.recordDiagnostic("wake", "\(reason): release started")
+        Preferences.recordDiagnostic("wake", "\(reason): mount started")
     }
 
     /// Bounded, so a permanently busy app cannot spin forever.
-    private var wakeReleaseAttempts = 0
+    private var wakeMountAttempts = 0
 
-    /// Runs a release asked for by `park release` in another process, then
+    /// Runs a mount asked for by `park mount` in another process, then
     /// answers with what a fresh read actually found. The CLI is waiting on
     /// that answer and will report a timeout rather than assume, so an
     /// unanswered request has to look like an unanswered request.
-    func serveReleaseRequest() {
+    func serveMountRequest() {
         guard let request = VetoBroker.pendingRequest() else { return }
         VetoBroker.consumeRequest()
         // Answer the doorbell before doing the work, so the CLI waits
         // instead of concluding that nobody is home.
         VetoBroker.acknowledge(nonce: request.nonce)
         busy = true
-        message = "Remounting, asked by the command line…"
+        message = "Mounting, asked by the command line…"
         let engine = self.engine
         Task.detached {
-            let (mounted, total) = engine.release(onlyDisks: request.disks)
+            let (mounted, total) = engine.mount(onlyDisks: request.disks)
             let found = engine.discover()
             VetoBroker.answer(nonce: request.nonce, mounted: mounted, total: total)
             await MainActor.run { [weak self] in
@@ -541,9 +541,9 @@ final class AppState: ObservableObject {
         }
     }
 
-    func setAutoRelease(_ on: Bool) {
-        Preferences.autoReleaseOnWake = on
-        autoReleaseOnWake = on
+    func setAutoMount(_ on: Bool) {
+        Preferences.autoMountOnWake = on
+        autoMountOnWake = on
     }
 
     func setIgnored(_ volume: Volume, _ on: Bool) {
@@ -559,14 +559,14 @@ final class AppState: ObservableObject {
         objectWillChange.send()
     }
 
-    /// One keystroke, both directions. Park when anything is mounted, release
+    /// One keystroke, both directions. Park when anything is mounted, mount
     /// when everything is parked. The chimes tell the two apart, which is why
     /// a toggle is safe here: you always hear which way it went.
     func hotKeyPressed() {
         guard !busy, !volumes.isEmpty else { return }
         triggers.noteManualPark()
         if isParked {
-            release()
+            mount()
         } else {
             park()
         }
@@ -618,7 +618,7 @@ final class AppState: ObservableObject {
         Preferences.hotKeyEnabled = on
         applyHotKey()
         if on, HotKeyCenter.shared.isRegistered {
-            message = "\(HotKeyCenter.displayName) parks the tower, and releases it when parked."
+            message = "\(HotKeyCenter.displayName) parks the tower, and mounts it when parked."
         } else if !on {
             message = "Global shortcut off."
         }
@@ -740,11 +740,11 @@ struct MenuContent: View {
             if actionable.isEmpty {
                 Text("\(label) — ignored")
             } else {
-                Button(mountedHere ? "Park \(label)" : "Release \(label)") {
+                Button(mountedHere ? "Park \(label)" : "Mount \(label)") {
                     if mountedHere {
                         state.park(only: [disk.device], label: label)
                     } else {
-                        state.release(only: [disk.device], label: label)
+                        state.mount(only: [disk.device], label: label)
                     }
                 }
                 .disabled(state.busy)
@@ -757,8 +757,8 @@ struct MenuContent: View {
         }
 
         .disabled(state.busy || state.isParked || state.volumes.isEmpty)
-        Button("Release (remount all)") {
-            state.release()
+        Button("Mount Tower") {
+            state.mount()
         }
         .disabled(state.busy || state.volumes.isEmpty || state.mountedCount == state.volumes.count)
 
@@ -798,9 +798,9 @@ struct MenuContent: View {
                 }
             }
             Divider()
-            Toggle("Remount automatically on wake", isOn: Binding(
-                get: { state.autoReleaseOnWake },
-                set: { state.setAutoRelease($0) }))
+            Toggle("Mount automatically on wake", isOn: Binding(
+                get: { state.autoMountOnWake },
+                set: { state.setAutoMount($0) }))
             Divider()
             Toggle("Keep DrivePark running (start at login, restart if it dies)", isOn: Binding(
                 get: { state.launchAtLogin },

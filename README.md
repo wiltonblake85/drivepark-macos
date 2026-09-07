@@ -59,7 +59,7 @@ swift build
 .build/debug/park status    # true state of every external disk
 .build/debug/park now       # park: unmount, verify, spin down
 .build/debug/park now --hold  # park and keep the remount veto active
-.build/debug/park release   # remount everything
+.build/debug/park mount     # mount everything
 ```
 
 ## Status

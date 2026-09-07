@@ -18,7 +18,7 @@ func printStatus() {
     if let holder = VetoBroker.holder {
         print("Remount veto held by \(holder.name) (pid \(holder.pid)), \(holder.uuids.count) volume(s).")
         print(holder.canAnswer
-              ? "`park release` will ask it to let go."
+              ? "`park mount` will ask it to let go."
               : "Press Ctrl-C in that process to drop it.")
     }
     print("")
@@ -176,7 +176,7 @@ case "now":
                 // another terminal is right immediately rather than right on
                 // the next sweep.
                 VetoBroker.clearHold()
-                print("\nVeto released. Volumes remain unmounted; run `park release` to remount.")
+                print("\nVeto dropped. Volumes remain unmounted; run `park mount` to mount them.")
                 exit(0)
             }
             sigint.resume()
@@ -189,21 +189,22 @@ case "now":
         if let blockers = outcome.blockerSummary { print("Blockers: \(blockers)") }
         exit(1)
     }
-case "release":
-    var releaseOnly: Set<String>? = nil
+case "mount":
+    var mountOnly: Set<String>? = nil
     if let flagIndex = arguments.firstIndex(of: "--only") {
         let valueIndex = arguments.index(after: flagIndex)
-        if arguments.indices.contains(valueIndex) { releaseOnly = [arguments[valueIndex]] }
+        if arguments.indices.contains(valueIndex) { mountOnly = [arguments[valueIndex]] }
     }
 
     // A veto belongs to the process that registered the Disk Arbitration
-    // callback, and no other process can lift it. Releasing locally while the
+    // callback, and no other process can lift it. Mounting locally while the
     // app holds one produces the app's own dissent string and no remount,
-    // which is what this command used to do (SPEC section 10, 2026-09-03).
+    // which is what this command used to do (SPEC section 10, 2026-09-03,
+    // when it was still named `park release`).
     if let holder = VetoBroker.holder {
         if holder.canAnswer {
-            print("DrivePark (pid \(holder.pid)) is holding the remount veto. Asking it to release.")
-            let nonce = VetoBroker.requestRelease(disks: releaseOnly)
+            print("DrivePark (pid \(holder.pid)) is holding the remount veto. Asking it to mount.")
+            let nonce = VetoBroker.requestMount(disks: mountOnly)
 
             // Two waits, because there are two different questions. The first
             // asks whether anyone is listening, and five seconds is generous
@@ -212,11 +213,11 @@ case "release":
             // and a fresh diskutil read follows it, so a whole tower can take
             // well past a minute on a slow enclosure.
             guard VetoBroker.awaitAck(nonce: nonce, timeout: 5) else {
-                // Not heard is not released. Say so, and say what to do
+                // Not heard is not mounted. Say so, and say what to do
                 // instead, rather than falling through to a local remount the
                 // veto will refuse and calling the refusal a result.
                 print("DrivePark did not pick up the request. The veto is still up.")
-                print("Use Release in the DrivePark menu, or quit DrivePark and run this again.")
+                print("Use Mount Tower in the DrivePark menu, or quit DrivePark and run this again.")
                 exit(1)
             }
             print("DrivePark has it. Waiting for the remount to finish and verify.")
@@ -234,12 +235,12 @@ case "release":
         // A `park now --hold` in another terminal holds a real veto and
         // listens for nothing. Point at it by name.
         print("\(holder.name) (pid \(holder.pid)) is holding the remount veto and cannot be asked.")
-        print("Press Ctrl-C in that terminal, then run `park release` again.")
+        print("Press Ctrl-C in that terminal, then run `park mount` again.")
         exit(1)
     }
 
     let engine = Engine()
-    let (mounted, total) = engine.release(onlyDisks: releaseOnly) { print($0) }
+    let (mounted, total) = engine.mount(onlyDisks: mountOnly) { print($0) }
     print("\(mounted) of \(total) external volume(s) mounted.")
     if mounted < total { exit(1) }
 case "ignore", "manage":
@@ -305,6 +306,10 @@ case "triggers":
         print("\(armed) \(status.trigger.label)\(health)")
         if let reason = status.reason { print("        \(reason)") }
     }
+    // The undo side of the triggers above. Shown here because it is the one
+    // wake-related setting with no other read-out outside the menu.
+    let wake = Preferences.autoMountOnWake ? "ARMED " : "off   "
+    print("\(wake) Mount automatically on wake (\(Int(Preferences.wakeMountDelay))s after wake)")
     let dead = TriggerHealth.armedButDead()
     print("")
     if !Preferences.appLooksAlive && !Preferences.enabledTriggers.isEmpty {
@@ -379,7 +384,7 @@ case "ignored":
         for volume in ignored { print("  \(volume.displayName)  (\(volume.uuid ?? "?"))") }
     }
 default:
-    print("usage: park [status | now [--hold] [--force] [--only diskN] | release [--only diskN]")
+    print("usage: park [status | now [--hold] [--force] [--only diskN] | mount [--only diskN]")
     print("            | ignore <volume> | manage <volume> | ignored | triggers")
     print("            | transom [on|off|token]]")
     exit(64)

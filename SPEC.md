@@ -75,8 +75,9 @@ DISCOVER -> UNMOUNT -> VERIFY -> PARK (hold) -> REPORT, plus UNPARK.
 
 - `park status`   read-only tree: enclosures, disks, volumes, mount state.
 - `park now`      run the core loop; `--hold` keeps the veto active until
-                  Ctrl-C or `park release`.
-- `park release`  unpark (remount managed volumes).
+                  Ctrl-C or `park mount`.
+- `park mount`    unpark (mount managed volumes). Named `park release`
+                  until 2026-09-07; dated entries below keep the old name.
 - Exit codes: 0 parked/ok, 1 partial, 2 failed, 64 usage.
 
 ## 6. Non-goals for v1
@@ -588,3 +589,50 @@ on, and one that arrives after you've walked away is the same as no card.
 
 Both it and the partial-park card are urgent now. Still ten seconds rather than
 persistent: neither is a warning and neither should need dismissing.
+
+### Release is now Mount, 2026-09-07
+
+The action that undoes a park was called Release: in the menu, in the CLI as
+`park release`, and through the code as `engine.release`, `AppState.release`,
+`autoReleaseOnWake`, `VetoBroker.requestRelease`. It never said what it did.
+Release of what? The word was borrowed from the veto (a release lets go of a
+hold), and to anyone who has not read VetoBroker the veto is invisible. What
+the user sees is a drive that is parked and a drive that is mounted, so the two
+verbs are Park and Mount, and that is now what everything says.
+
+Renamed end to end rather than at the surface, because a product that says
+Mount over code that says release is a tax on every future reader. Menu items
+are `Park Tower` / `Mount Tower` and `Park <drive>` / `Mount <drive>`; the wake
+toggle is "Mount automatically on wake"; the CLI is `park mount [--only diskN]`
+with no alias for the old name. Identifiers follow: `engine.mount`,
+`AppState.mount`, `serveMountRequest`, `autoMountOnWake`, `wakeMountDelay`,
+`VetoBroker.requestMount`, notification `…drivepark.mountRequested`, handshake
+keys `vetoMountRequest/Ack/Answer`. Diagnostics now read `mount started`,
+`auto-mount is off`, `mounting in 5s`. Where a verb refers to the veto itself
+being let go, it now says dropped, so the two ideas stop sharing a word.
+
+Two consequences carried real risk and both are handled.
+
+The wake preferences are persisted under their key names, so a bare rename
+would have silently switched auto-mount off for anyone who had it on. A
+one-time carry-over in `Preferences` copies `autoReleaseOnWake` and
+`wakeReleaseDelay` to the new keys on first read and deletes the old ones.
+**Proven on the tower**: seeded the legacy keys with `defaults write`, ran
+`park triggers`, read `ARMED  Mount automatically on wake (12s after wake)`,
+and the store afterward held only the new keys. Then cleaned up, since the
+setting had never actually been on here.
+
+The handshake keys and the distributed notification are transient, consumed
+inside a minute, so they needed no migration. But the CLI and the app must
+agree on them, and until the renamed app is installed the old app is still
+listening for the old doorbell. **`park mount` from the new build will time out
+against the old app** with "did not pick up the request", which is the honest
+answer and the correct one. Reinstall the app before relying on the new CLI.
+
+`park triggers` also gained one line, the mount-on-wake state and delay,
+because it was the only wake setting with no read-out outside the menu, and
+proving the migration needed one.
+
+Left as written: the dated entries above, `.attic/`, and commit messages. They
+quote what actually printed at the time, and rewriting evidence to match a
+vocabulary change would make the record less true, not more consistent.

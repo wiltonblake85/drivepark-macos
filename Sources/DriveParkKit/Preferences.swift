@@ -47,8 +47,30 @@ public enum Preferences {
     /// exactly one store and nobody re-derives it.
     public static var sharedStore: UserDefaults { store }
     private static let triggersKey = "enabledTriggers"
-    private static let autoReleaseKey = "autoReleaseOnWake"
-    private static let wakeDelayKey = "wakeReleaseDelay"
+    private static let autoMountKey = "autoMountOnWake"
+    private static let wakeDelayKey = "wakeMountDelay"
+
+    /// One-time carry-over from the names these settings had before the
+    /// Release-to-Mount rename on 2026-09-07. A rename that silently turns
+    /// auto-mount off for anyone who had it on is a regression wearing a
+    /// vocabulary change as a disguise. Runs on first read of either key,
+    /// copies what it finds, then removes the old keys so it cannot run twice.
+    private static let legacyAutoMountKey = "autoReleaseOnWake"
+    private static let legacyWakeDelayKey = "wakeReleaseDelay"
+    private static let wakeKeysMigrated: Void = {
+        if store.object(forKey: legacyAutoMountKey) != nil {
+            if store.object(forKey: autoMountKey) == nil {
+                store.set(store.bool(forKey: legacyAutoMountKey), forKey: autoMountKey)
+            }
+            store.removeObject(forKey: legacyAutoMountKey)
+        }
+        if store.object(forKey: legacyWakeDelayKey) != nil {
+            if store.object(forKey: wakeDelayKey) == nil {
+                store.set(store.double(forKey: legacyWakeDelayKey), forKey: wakeDelayKey)
+            }
+            store.removeObject(forKey: legacyWakeDelayKey)
+        }
+    }()
 
     /// Triggers currently armed. Empty by default: DrivePark parks on its own
     /// only after the user has said so.
@@ -70,20 +92,21 @@ public enum Preferences {
         enabledTriggers = current
     }
 
-    /// Remount automatically once the machine wakes and the displays are back.
-    public static var autoReleaseOnWake: Bool {
-        get { store.bool(forKey: autoReleaseKey) }
-        set { store.set(newValue, forKey: autoReleaseKey) }
+    /// Mount automatically once the machine wakes and the displays are back.
+    public static var autoMountOnWake: Bool {
+        get { _ = wakeKeysMigrated; return store.bool(forKey: autoMountKey) }
+        set { _ = wakeKeysMigrated; store.set(newValue, forKey: autoMountKey) }
     }
 
-    /// Seconds to wait after wake before remounting. Docks and multi-bay
+    /// Seconds to wait after wake before mounting. Docks and multi-bay
     /// bridges re-enumerate slowly; mounting into that window fails.
-    public static var wakeReleaseDelay: TimeInterval {
+    public static var wakeMountDelay: TimeInterval {
         get {
+            _ = wakeKeysMigrated
             let stored = store.double(forKey: wakeDelayKey)
             return stored > 0 ? stored : 5
         }
-        set { store.set(max(0, newValue), forKey: wakeDelayKey) }
+        set { _ = wakeKeysMigrated; store.set(max(0, newValue), forKey: wakeDelayKey) }
     }
 
     /// How long a sleep-triggered park may take before DrivePark stops asking

@@ -9,7 +9,7 @@
 //                  stable for years; if it ever stops firing the other two
 //                  triggers are unaffected.
 //
-// Auto-release only ever undoes an auto-park. A drive the user parked by hand
+// Auto-mount only ever undoes an auto-park. A drive the user parked by hand
 // stays parked through a wake cycle, because they had a reason.
 
 import Foundation
@@ -21,7 +21,7 @@ final class TriggerCoordinator {
     private let powerWatch = PowerWatch()
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var distributedObservers: [NSObjectProtocol] = []
-    private var pendingRelease: DispatchWorkItem?
+    private var pendingMount: DispatchWorkItem?
 
     /// True only when the most recent park came from a trigger, not a click.
     ///
@@ -91,7 +91,7 @@ final class TriggerCoordinator {
             allow()
             return
         }
-        pendingRelease?.cancel()
+        pendingMount?.cancel()
         let budget = Preferences.sleepParkBudget
         let deadline = Date().addingTimeInterval(budget)
 
@@ -107,7 +107,7 @@ final class TriggerCoordinator {
     private func fire(_ trigger: ParkTrigger) {
         guard Preferences.isEnabled(trigger), let state, !state.volumes.isEmpty else { return }
         guard !state.isParked else { return }
-        pendingRelease?.cancel()
+        pendingMount?.cancel()
         parkedByTrigger = true
         Preferences.recordDiagnostic("wakeArm", "\(trigger.rawValue) park, parkedByTrigger set")
         state.park(trigger: trigger, deadline: nil, completion: nil)
@@ -115,12 +115,12 @@ final class TriggerCoordinator {
 
     private func handleWake(reason: String) {
         // Say why nothing happened. On 2026-09-04 a real sleep parked the tower
-        // and the wake released nothing, and there was no way to tell from
+        // and the wake mounted nothing, and there was no way to tell from
         // outside whether the notification never arrived or a guard declined
         // it. A trigger that silently does not fire is the failure this app
         // exists to refuse, so it now reports which of the three it was.
-        guard Preferences.autoReleaseOnWake else {
-            Preferences.recordDiagnostic("wake", "\(reason): auto-release is off")
+        guard Preferences.autoMountOnWake else {
+            Preferences.recordDiagnostic("wake", "\(reason): auto-mount is off")
             return
         }
         guard parkedByTrigger else {
@@ -132,27 +132,27 @@ final class TriggerCoordinator {
             Preferences.recordDiagnostic("wake", "\(reason): no app state")
             return
         }
-        Preferences.recordDiagnostic("wake", "\(reason): releasing in \(Int(Preferences.wakeReleaseDelay))s")
-        pendingRelease?.cancel()
+        Preferences.recordDiagnostic("wake", "\(reason): mounting in \(Int(Preferences.wakeMountDelay))s")
+        pendingMount?.cancel()
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, let state = self.state else { return }
                 self.parkedByTrigger = false
-                Preferences.recordDiagnostic("wake", "\(reason): release running now")
-                state.release(reason: reason)
+                Preferences.recordDiagnostic("wake", "\(reason): mount running now")
+                state.mount(reason: reason)
             }
         }
-        pendingRelease = work
+        pendingMount = work
         // Docks and multi-bay bridges re-enumerate slowly. Mounting into that
         // window fails, and a failed remount reads as a broken app.
-        DispatchQueue.main.asyncAfter(deadline: .now() + Preferences.wakeReleaseDelay,
+        DispatchQueue.main.asyncAfter(deadline: .now() + Preferences.wakeMountDelay,
                                       execute: work)
     }
 
     /// A manual park should not be undone by the next wake.
     func noteManualPark() {
         parkedByTrigger = false
-        pendingRelease?.cancel()
+        pendingMount?.cancel()
     }
 
     deinit {

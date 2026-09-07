@@ -1,19 +1,23 @@
 // VetoBroker.swift — who is holding the remount veto, and how to ask them to
 // drop it.
 //
+// Vocabulary: the action that remounts parked volumes is called Mount, in the
+// menu, in the CLI (`park mount`), and in code. It was called Release until
+// 2026-09-07; the history below keeps the old name where it quotes the past.
+//
 // The veto is a Disk Arbitration mount-approval callback registered on a
 // DASession and gated by `parkedVolumeUUIDs`. Both live in one process's
 // memory, and that is not an implementation detail that can be factored away:
 // DA dissent comes from the process that registered the callback, so no other
-// process can lift it. `park release` in a second process clears its own empty
+// process can lift it. `park mount` in a second process clears its own empty
 // copy of the set and changes nothing.
 //
 // Which is the defect logged in SPEC section 10 on 2026-09-03. With the app
-// holding a veto, `park release` reported the app's own dissent string back to
+// holding a veto, `park release` (as it was then named) reported the app's own dissent string back to
 // the user and stopped. It told the exact truth and offered no way out, which
 // is half a product.
 //
-// So the holder publishes the fact that it is holding, and a release becomes a
+// So the holder publishes the fact that it is holding, and a mount becomes a
 // message to the holder rather than an attempt to reach into its memory. The
 // shared preferences suite carries the state and a distributed notification is
 // the doorbell. Nothing here is trusted on its own: the requester confirms by
@@ -24,16 +28,19 @@ import Foundation
 
 public enum VetoBroker {
     /// Doorbell. Carries no payload, because the payload is in the store and a
-    /// notification that arrives twice must not mean two releases.
-    public static let releaseRequested = Notification.Name("com.wiltonblake.drivepark.releaseRequested")
+    /// notification that arrives twice must not mean two mounts.
+    public static let mountRequested = Notification.Name("com.wiltonblake.drivepark.mountRequested")
 
     private static var store: UserDefaults { Preferences.sharedStore }
     private static let holderPIDKey = "vetoHolderPID"
     private static let holderNameKey = "vetoHolderName"
     private static let holderUUIDsKey = "vetoHolderUUIDs"
-    private static let requestKey = "vetoReleaseRequest"
-    private static let ackKey = "vetoReleaseAck"
-    private static let answerKey = "vetoReleaseAnswer"
+    // Transient handshake keys: written, answered, and consumed inside a
+    // minute, so renaming them (2026-09-07) needed no migration. The app and
+    // the CLI ship from one package, so they never disagree on these names.
+    private static let requestKey = "vetoMountRequest"
+    private static let ackKey = "vetoMountAck"
+    private static let answerKey = "vetoMountAnswer"
 
     public struct Holder {
         public let pid: pid_t
@@ -65,7 +72,7 @@ public enum VetoBroker {
     ///
     /// The liveness check is the important half. A veto dies with the process
     /// that registered it, so a record left behind by a crash describes a hold
-    /// that no longer exists, and acting on it would block a release that would
+    /// that no longer exists, and acting on it would block a mount that would
     /// otherwise have worked.
     public static var holder: Holder? {
         let pid = pid_t(store.integer(forKey: holderPIDKey))
@@ -79,10 +86,10 @@ public enum VetoBroker {
         return Holder(pid: pid, name: name, uuids: uuids)
     }
 
-    // MARK: - Asking the holder to release
+    // MARK: - Asking the holder to mount
 
     /// - Returns: the nonce to wait on.
-    public static func requestRelease(disks: Set<String>?) -> String {
+    public static func requestMount(disks: Set<String>?) -> String {
         let nonce = UUID().uuidString
         store.set(["nonce": nonce,
                    "disks": disks.map(Array.init) ?? [],
@@ -92,7 +99,7 @@ public enum VetoBroker {
         store.removeObject(forKey: ackKey)
         store.synchronize()
         DistributedNotificationCenter.default().postNotificationName(
-            releaseRequested, object: nil, userInfo: nil, deliverImmediately: true)
+            mountRequested, object: nil, userInfo: nil, deliverImmediately: true)
         return nonce
     }
 
