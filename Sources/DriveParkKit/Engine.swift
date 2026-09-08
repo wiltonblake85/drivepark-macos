@@ -52,6 +52,40 @@ public struct ParkOutcome {
     }
 }
 
+public struct VolumeMountResult {
+    public let volume: Volume
+    public let success: Bool
+    public let detail: String?
+    /// Wall-clock time for this volume's mount request. When the drive was
+    /// spun down this is mostly the platters coming back up.
+    public let duration: TimeInterval
+}
+
+public struct MountOutcome {
+    /// One entry per volume this run asked to mount, in discovery order.
+    public let results: [VolumeMountResult]
+    /// Managed volumes seen by the verifying read, and how many were mounted.
+    public let total: Int
+    public let mountedCount: Int
+    public var timing = MountTiming()
+
+    public var summary: String { timing.summary }
+}
+
+/// Where a mount's wall-clock went. Same discipline as ParkTiming: measured,
+/// never estimated.
+public struct MountTiming {
+    public var discover: TimeInterval = 0
+    public var mount: TimeInterval = 0
+    public var verify: TimeInterval = 0
+    public var total: TimeInterval = 0
+
+    public var summary: String {
+        String(format: "%.2fs total (discover %.2f, mount %.2f, verify %.2f)",
+               total, discover, mount, verify)
+    }
+}
+
 public final class Engine {
     private let ops: DiskOps?
     static let retryDelays: [TimeInterval] = [0, 2, 5, 10]
@@ -285,10 +319,14 @@ public final class Engine {
     }
 
     public func mount(onlyDisks: Set<String>? = nil,
-                      progress: (String) -> Void = { _ in }) -> (mounted: Int, total: Int) {
-        guard let ops else { return (0, 0) }
+                      progress: (String) -> Void = { _ in }) -> MountOutcome {
+        guard let ops else { return MountOutcome(results: [], total: 0, mountedCount: 0) }
+        let started = Date()
+        var timing = MountTiming()
+        let discoverStarted = Date()
         let disks = discoverExternalDisks()
             .filter { onlyDisks?.contains($0.device) ?? true }
+        timing.discover = Date().timeIntervalSince(discoverStarted)
         // Drop the veto for exactly what is being mounted.
         if onlyDisks == nil {
             parkedVolumeUUIDs = []
@@ -302,21 +340,57 @@ public final class Engine {
             }
         }
         VetoBroker.publishHold(parkedVolumeUUIDs)
-        for disk in disks {
-            for volume in disk.allVolumes
-            where !volume.isMounted && !Preferences.isIgnored(volume.uuid) {
-                progress("Mounting \(volume.displayName)")
-                let result = ops.mount(volumeBSDName: volume.device)
-                if !result.success {
-                    progress("\(volume.displayName) failed: \(result.detail ?? "unknown")")
+
+        // Concurrent per disk, for the same reason the park is. Measured
+        // 2026-09-08 with the drives spun down after a park: each mount sat 8
+        // to 12 s in diskarbitrationd's probe, which is the platters coming
+        // back up, and the mount itself took a tenth of a second after that.
+        // Three spin-ups in sequence was 33.7 s. Three at once cost the
+        // slowest one. No approval timeout here (Ejectify's callback was on
+        // unmount), so what remains is physics.
+        let mountStarted = Date()
+        let lock = NSLock()
+        var indexed: [(disk: Int, volume: Int, result: VolumeMountResult)] = []
+        withoutActuallyEscaping(progress) { progress in
+            let report: (String) -> Void = { line in
+                lock.lock(); defer { lock.unlock() }
+                progress(line)
+            }
+            DispatchQueue.concurrentPerform(iterations: disks.count) { diskIndex in
+                let disk = disks[diskIndex]
+                for (volumeIndex, volume) in disk.allVolumes.enumerated()
+                where !volume.isMounted && !Preferences.isIgnored(volume.uuid) {
+                    report("Mounting \(volume.displayName)")
+                    let volumeStarted = Date()
+                    let result = ops.mount(volumeBSDName: volume.device)
+                    let duration = Date().timeIntervalSince(volumeStarted)
+                    if !result.success {
+                        report("\(volume.displayName) failed: \(result.detail ?? "unknown")")
+                    }
+                    lock.lock()
+                    indexed.append((diskIndex, volumeIndex, VolumeMountResult(
+                        volume: volume, success: result.success,
+                        detail: result.detail, duration: duration)))
+                    lock.unlock()
                 }
             }
         }
+        let results = indexed
+            .sorted { ($0.disk, $0.volume) < ($1.disk, $1.volume) }
+            .map { $0.result }
+        timing.mount = Date().timeIntervalSince(mountStarted)
+
         // VERIFY with a fresh read.
+        let verifyStarted = Date()
         let after = discoverExternalDisks()
             .filter { onlyDisks?.contains($0.device) ?? true }
             .flatMap { $0.allVolumes }
             .filter { !Preferences.isIgnored($0.uuid) }
-        return (after.filter { $0.isMounted }.count, after.count)
+        timing.verify = Date().timeIntervalSince(verifyStarted)
+        timing.total = Date().timeIntervalSince(started)
+        return MountOutcome(results: results, total: after.count,
+                            mountedCount: after.filter { $0.isMounted }.count,
+                            timing: timing)
     }
+
 }

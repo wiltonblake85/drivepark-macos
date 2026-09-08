@@ -256,7 +256,10 @@ final class AppState: ObservableObject {
         message = "Mounting…"
         let engine = self.engine
         Task.detached {
-            let (mounted, total) = engine.mount(onlyDisks: only)
+            let outcome = engine.mount(onlyDisks: only)
+            Self.record(outcome, trigger: label ?? "manual")
+            let (mounted, total) = (outcome.mountedCount, outcome.total)
+            let split = String(format: " %.1fs.", outcome.timing.total)
             let found = engine.discover()
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -264,11 +267,11 @@ final class AppState: ObservableObject {
                 self.lastVerifiedAt = Date()
                 self.busy = false
                 if let label {
-                    self.message = "\(label) back online."
+                    self.message = "\(label) back online." + split
                 } else {
                     self.message = mounted == total
-                        ? "All volumes back online."
-                        : "\(mounted) of \(total) volumes mounted."
+                        ? "All volumes back online." + split
+                        : "\(mounted) of \(total) volumes mounted." + split
                 }
             }
         }
@@ -349,7 +352,9 @@ final class AppState: ObservableObject {
         message = "Mounting, asked by the command line…"
         let engine = self.engine
         Task.detached {
-            let (mounted, total) = engine.mount(onlyDisks: request.disks)
+            let outcome = engine.mount(onlyDisks: request.disks)
+            Self.record(outcome, trigger: "command line")
+            let (mounted, total) = (outcome.mountedCount, outcome.total)
             let found = engine.discover()
             VetoBroker.answer(nonce: request.nonce, mounted: mounted, total: total)
             await MainActor.run { [weak self] in
@@ -535,6 +540,21 @@ final class AppState: ObservableObject {
         }
         for note in outcome.notes {
             parkLog.info("  \(note, privacy: .public)")
+        }
+    }
+
+    nonisolated private static func record(_ outcome: MountOutcome, trigger: String) {
+        guard !outcome.results.isEmpty else {
+            parkLog.info("mount (\(trigger, privacy: .public)): nothing to do")
+            return
+        }
+        parkLog.info("mount (\(trigger, privacy: .public)): \(outcome.summary, privacy: .public)")
+        for result in outcome.results {
+            let verdict = result.success ? "mounted" : "FAILED \(result.detail ?? "")"
+            let line = String(format: "%@ (%@): %@ in %.2fs",
+                              result.volume.displayName, result.volume.device,
+                              verdict, result.duration)
+            parkLog.info("  \(line, privacy: .public)")
         }
     }
 

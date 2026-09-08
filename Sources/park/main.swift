@@ -240,9 +240,14 @@ case "mount":
     }
 
     let engine = Engine()
-    let (mounted, total) = engine.mount(onlyDisks: mountOnly) { print($0) }
-    print("\(mounted) of \(total) external volume(s) mounted.")
-    if mounted < total { exit(1) }
+    let outcome = engine.mount(onlyDisks: mountOnly) { print($0) }
+    for result in outcome.results {
+        print(String(format: "  %@: %@ in %.2fs", result.volume.displayName,
+                     result.success ? "mounted" : "FAILED", result.duration))
+    }
+    if !outcome.results.isEmpty { print("Timing: " + outcome.summary) }
+    print("\(outcome.mountedCount) of \(outcome.total) external volume(s) mounted.")
+    if outcome.mountedCount < outcome.total { exit(1) }
 case "ignore", "manage":
     // park ignore "Plex"   -> never touch it
     // park manage "Plex"   -> touch it again
