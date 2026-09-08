@@ -117,60 +117,55 @@ public final class Engine {
         // the same violence.
         let ladder = force ? [TimeInterval(0)] : Self.retryDelays
 
-        var results: [VolumeParkResult] = []
+        // One disk at a time, and each one waited on the same stranger.
+        // Measured on the tower 2026-09-08: a full park took 23 s, and
+        // discovery for all three bays is about a second of that. The rest
+        // was three unmounts of roughly 11 s each, paid in sequence.
+        //
+        // The 11 s was not the filesystem. diskarbitrationd offers every
+        // unmount to each client holding an unmount-approval callback, waits
+        // about 10.6 s for one that never answers, logs "not responding" and
+        // only then unmounts, which takes 0.2 to 0.6 s. Ejectify was that
+        // client. With it running, the same park measured 12.16 s here; with
+        // it quit, 1.93 s. DrivePark cannot shorten another process's
+        // approval timeout, so this loop does the one thing it can: it runs
+        // the disks concurrently, so the wait is paid once instead of three
+        // times. Within a disk the volumes stay sequential; two flushes
+        // contending for one spindle would only slow each other.
+        //
+        // Spin-down stays sequential. Measured at 0.03 s for all three
+        // bays, so there is nothing to win, and the TerraMaster bridge that
+        // stopped answering every bay at once on 2026-08-31 is not a thing
+        // to send three STOP UNIT commands to for no gain.
         let unmountStarted = Date()
-        for disk in disks {
-            for volume in disk.allVolumes
-            where volume.isMounted && !Preferences.isIgnored(volume.uuid) {
-                    var success = false
-                    var blockers: [String] = []
-                    var ranOutOfTime = false
-                    let volumeStarted = Date()
-                    var usedAttempts = 0
-                    for (attempt, delay) in ladder.enumerated() {
-                        if let deadline, Date() >= deadline {
-                            ranOutOfTime = true
-                            progress("\(volume.displayName): out of time before attempt \(attempt + 1)")
-                            break
-                        }
-                        if delay > 0 {
-                            // Never sleep past the deadline waiting to retry.
-                            if let deadline {
-                                let remaining = deadline.timeIntervalSinceNow
-                                if remaining <= 0 {
-                                    ranOutOfTime = true
-                                    progress("\(volume.displayName): out of time before attempt \(attempt + 1)")
-                                    break
-                                }
-                                Thread.sleep(forTimeInterval: min(delay, remaining))
-                            } else {
-                                Thread.sleep(forTimeInterval: delay)
-                            }
-                        }
-                        progress("Unmounting \(volume.displayName), attempt \(attempt + 1)/\(ladder.count)")
-                        usedAttempts = attempt + 1
-                        if force {
-                            progress("Forcing \(volume.displayName) unmounted, open files will lose unwritten data")
-                        }
-                        let result = ops.unmount(volumeBSDName: volume.device, force: force)
-                        if result.success { success = true; break }
-                        if let mountPoint = volume.mountPoint {
-                            let found = lsofBlockers(mountPoint: mountPoint)
-                            if !found.isEmpty {
-                                blockers = found
-                                progress("\(volume.displayName) blocked by " + found.joined(separator: ", "))
-                            }
-                        }
-                    }
-                    if ranOutOfTime && blockers.isEmpty {
-                        blockers = ["ran out of time before macOS forced sleep"]
-                    }
-                results.append(VolumeParkResult(
-                    volume: volume, success: success, blockers: blockers,
-                    duration: Date().timeIntervalSince(volumeStarted),
-                    attempts: usedAttempts))
+        let lock = NSLock()
+        var indexedResults: [(disk: Int, volume: Int, result: VolumeParkResult)] = []
+        // The progress closure is not written for reentry: the app hops it to
+        // the main actor, the CLI prints. Serialized, so neither has to be.
+        // withoutActuallyEscaping because concurrentPerform returns only when
+        // every iteration has, so nothing here outlives the call.
+        withoutActuallyEscaping(progress) { progress in
+            let report: (String) -> Void = { line in
+                lock.lock(); defer { lock.unlock() }
+                progress(line)
+            }
+            DispatchQueue.concurrentPerform(iterations: disks.count) { diskIndex in
+                let disk = disks[diskIndex]
+                for (volumeIndex, volume) in disk.allVolumes.enumerated()
+                where volume.isMounted && !Preferences.isIgnored(volume.uuid) {
+                    let result = Self.unmountWithRetries(
+                        volume, ops: ops, ladder: ladder, deadline: deadline,
+                        force: force, progress: report)
+                    lock.lock()
+                    indexedResults.append((diskIndex, volumeIndex, result))
+                    lock.unlock()
+                }
             }
         }
+        // Report in discovery order, whatever order the threads finished in.
+        let results = indexedResults
+            .sorted { ($0.disk, $0.volume) < ($1.disk, $1.volume) }
+            .map { $0.result }
 
         timing.unmount = Date().timeIntervalSince(unmountStarted)
 
@@ -232,6 +227,61 @@ public final class Engine {
         }
         return ParkOutcome(results: results, stillMounted: stillMounted,
                            notes: notes, timing: timing)
+    }
+
+    /// Climbs the retry ladder for one volume. Pure function of its inputs
+    /// apart from the unmount itself, so it can run on any thread.
+    private static func unmountWithRetries(_ volume: Volume, ops: DiskOps,
+                                           ladder: [TimeInterval], deadline: Date?,
+                                           force: Bool,
+                                           progress: (String) -> Void) -> VolumeParkResult {
+        var success = false
+        var blockers: [String] = []
+        var ranOutOfTime = false
+        let volumeStarted = Date()
+        var usedAttempts = 0
+        for (attempt, delay) in ladder.enumerated() {
+            if let deadline, Date() >= deadline {
+                ranOutOfTime = true
+                progress("\(volume.displayName): out of time before attempt \(attempt + 1)")
+                break
+            }
+            if delay > 0 {
+                // Never sleep past the deadline waiting to retry.
+                if let deadline {
+                    let remaining = deadline.timeIntervalSinceNow
+                    if remaining <= 0 {
+                        ranOutOfTime = true
+                        progress("\(volume.displayName): out of time before attempt \(attempt + 1)")
+                        break
+                    }
+                    Thread.sleep(forTimeInterval: min(delay, remaining))
+                } else {
+                    Thread.sleep(forTimeInterval: delay)
+                }
+            }
+            progress("Unmounting \(volume.displayName), attempt \(attempt + 1)/\(ladder.count)")
+            usedAttempts = attempt + 1
+            if force {
+                progress("Forcing \(volume.displayName) unmounted, open files will lose unwritten data")
+            }
+            let result = ops.unmount(volumeBSDName: volume.device, force: force)
+            if result.success { success = true; break }
+            if let mountPoint = volume.mountPoint {
+                let found = lsofBlockers(mountPoint: mountPoint)
+                if !found.isEmpty {
+                    blockers = found
+                    progress("\(volume.displayName) blocked by " + found.joined(separator: ", "))
+                }
+            }
+        }
+        if ranOutOfTime && blockers.isEmpty {
+            blockers = ["ran out of time before macOS forced sleep"]
+        }
+        return VolumeParkResult(
+            volume: volume, success: success, blockers: blockers,
+            duration: Date().timeIntervalSince(volumeStarted),
+            attempts: usedAttempts)
     }
 
     public func mount(onlyDisks: Set<String>? = nil,

@@ -3,7 +3,15 @@
 
 import SwiftUI
 import AppKit
+import os
 import DriveParkKit
+
+/// The one durable record of what a park did. The menu line and the notch
+/// card are read once and gone; this survives in the unified log, so the
+/// next question about where the time went has an answer instead of a guess.
+///
+///   log show --last 1h --predicate 'subsystem == "com.wiltonblake.drivepark"'
+let parkLog = Logger(subsystem: "com.wiltonblake.drivepark", category: "park")
 
 @main
 struct DriveParkApp: App {
@@ -377,6 +385,7 @@ final class AppState: ObservableObject {
             let outcome = engine.park(onlyDisks: only, deadline: deadline, force: force) { line in
                 Task { @MainActor in self.workingOn = line }
             }
+            Self.record(outcome, trigger: triggerLabel ?? label ?? "manual")
             let found = engine.discover()
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -509,15 +518,40 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Writes the timing split and every volume's verdict to the unified log.
+    /// Public values only: volume names, device nodes, seconds, attempt counts.
+    nonisolated private static func record(_ outcome: ParkOutcome, trigger: String) {
+        guard outcome.didWork else {
+            parkLog.info("park (\(trigger, privacy: .public)): nothing to do")
+            return
+        }
+        parkLog.info("park (\(trigger, privacy: .public)): \(outcome.timing.summary, privacy: .public)")
+        for result in outcome.results {
+            let verdict = result.success ? "unmounted" : "FAILED"
+            let line = String(format: "%@ (%@): %@ in %.2fs, %d attempt(s)",
+                              result.volume.displayName, result.volume.device,
+                              verdict, result.duration, result.attempts)
+            parkLog.info("  \(line, privacy: .public)")
+        }
+        for note in outcome.notes {
+            parkLog.info("  \(note, privacy: .public)")
+        }
+    }
+
     private static func describe(_ outcome: ParkOutcome, label: String?,
                                  trigger: String?) -> String {
         if outcome.parked && !outcome.didWork {
             return "No action taken. Nothing this run manages was mounted."
         }
         if outcome.parked {
-            if let label { return "\(label) parked." }
-            if let trigger { return "Parked because \(trigger). Safe to power off." }
-            return "Parked. Safe to power off the tower."
+            // The split rides along on the menu line so the answer to "why did
+            // that take so long" is one click away, not a log query.
+            let split = String(format: " %.1fs: unmount %.1f, spin-down %.1f.",
+                               outcome.timing.total, outcome.timing.unmount,
+                               outcome.timing.spinDown)
+            if let label { return "\(label) parked." + split }
+            if let trigger { return "Parked because \(trigger). Safe to power off." + split }
+            return "Parked. Safe to power off the tower." + split
         }
         let names = outcome.stillMounted.map { $0.displayName }.joined(separator: ", ")
         var text = "Not parked. Still mounted: \(names)."
