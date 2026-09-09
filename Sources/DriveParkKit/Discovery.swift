@@ -40,8 +40,18 @@ public struct DiskutilTimeout {
 /// Both pipes are drained. Reading stdout while leaving stderr undrained
 /// deadlocks as soon as a command is verbose enough to fill that buffer.
 func runDiskutil(_ args: [String], timeout: TimeInterval = 10) -> [String: Any]? {
+    runPlistTool("/usr/sbin/diskutil", args, timeout: timeout,
+                 onTimeout: DiskutilTimeout.record)
+}
+
+/// The same discipline for any tool that prints a plist. hdiutil gets it too:
+/// a tool that must not hang on a stuck enclosure must not hang on a stuck
+/// disk image either.
+func runPlistTool(_ executable: String, _ args: [String],
+                  timeout: TimeInterval = 10,
+                  onTimeout: () -> Void = {}) -> [String: Any]? {
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+    process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = args
     let out = Pipe()
     let err = Pipe()
@@ -49,7 +59,7 @@ func runDiskutil(_ args: [String], timeout: TimeInterval = 10) -> [String: Any]?
     process.standardError = err
     do { try process.run() } catch { return nil }
 
-    let readers = DispatchQueue(label: "drivepark.diskutil.read", attributes: .concurrent)
+    let readers = DispatchQueue(label: "drivepark.plisttool.read", attributes: .concurrent)
     let group = DispatchGroup()
     let box = DataBox()
     readers.async(group: group) {
@@ -60,7 +70,7 @@ func runDiskutil(_ args: [String], timeout: TimeInterval = 10) -> [String: Any]?
     }
 
     if group.wait(timeout: .now() + timeout) == .timedOut {
-        DiskutilTimeout.record()
+        onTimeout()
         process.terminate()
         if group.wait(timeout: .now() + 2) == .timedOut, process.isRunning {
             // A process blocked in the kernel on an unresponsive USB bridge
@@ -147,11 +157,11 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
     // Disk images are opt-in, and dropping `physical` is NOT how you opt in.
     //
     // Measured on the tower 2026-09-04: `diskutil list external physical`
-    // returns 3 whole disks, and `diskutil list external` returns 22. Only two
-    // of the extra nineteen are disk images. The rest are the APFS synthesized
-    // containers that the loop further down already maps back to their physical
-    // stores, so admitting them as whole disks would count every volume twice
-    // and offer to eject a container.
+    // returns 3 whole disks, and `diskutil list external` returns 22. Sixteen
+    // of the extra nineteen are disk images. The other three are the APFS
+    // synthesized containers that the loop further down already maps back to
+    // their physical stores, so admitting them as whole disks would count every
+    // volume twice and offer to eject a container.
     //
     // So the wide list is a candidate list, not an answer. Each candidate is
     // kept only if diskutil calls it a Disk Image, which costs nothing extra

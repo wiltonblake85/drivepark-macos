@@ -61,6 +61,30 @@ func printStatus() {
         print("Disk images are included in this listing (park images off to exclude).")
         print("")
     }
+
+    // An image backed by a file on one of these volumes will dissent its
+    // unmount. Saying so here means a park failure is predicted instead of
+    // discovered. Park detaches these itself; status only reports.
+    if let images = readAttachedImages(), !images.isEmpty {
+        var inTheWay: [(String, String)] = []
+        for disk in disks {
+            for volume in disk.allVolumes where volume.isMounted {
+                guard let mountPoint = volume.mountPoint else { continue }
+                if Preferences.isIgnored(volume.uuid) { continue }
+                for image in imagesBacked(byVolumeAt: resolvedPath(mountPoint), in: images) {
+                    inTheWay.append((image.imagePath, volume.displayName))
+                }
+            }
+        }
+        if !inTheWay.isEmpty {
+            print("Disk image(s) in the way:")
+            for (path, volume) in inTheWay {
+                print("  \(path)")
+                print("    backed by a file on \"\(volume)\". A park will detach it first.")
+            }
+            print("")
+        }
+    }
     if total == 0 {
         print("Overall: no volumes discovered.")
     } else if mounted == 0 {

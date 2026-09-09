@@ -17,14 +17,16 @@ public struct VolumeParkResult {
 /// whole point of this tool is that it does not guess about its own behaviour.
 public struct ParkTiming {
     public var discover: TimeInterval = 0
+    /// Reading hdiutil and detaching any image that pins a managed volume.
+    public var diskImages: TimeInterval = 0
     public var unmount: TimeInterval = 0
     public var verify: TimeInterval = 0
     public var spinDown: TimeInterval = 0
     public var total: TimeInterval = 0
 
     public var summary: String {
-        String(format: "%.2fs total (discover %.2f, unmount %.2f, verify %.2f, spin-down %.2f)",
-               total, discover, unmount, verify, spinDown)
+        String(format: "%.2fs total (discover %.2f, images %.2f, unmount %.2f, verify %.2f, spin-down %.2f)",
+               total, discover, diskImages, unmount, verify, spinDown)
     }
 }
 
@@ -146,6 +148,73 @@ public final class Engine {
             }
         }
 
+        // A disk image backed by a file on one of these volumes pins it.
+        // Resolved here, before the unmount loop, and never as a rung on the
+        // retry ladder: measured on the tower 2026-09-09, the dissent lands in
+        // 0.28s and never clears, so the ladder would spend its full 17s
+        // learning what one hdiutil call already knows. `lsof -Fpc` can only
+        // answer "diskimages-helper (pid 29138)", which nobody can act on;
+        // the backing path is the sentence that means something.
+        //
+        // Not gated on Preferences.includeDiskImages. That setting decides
+        // whether a .dmg is a parkable drive. This decides whether one is in
+        // the way, which is a different question, and gating them together
+        // would make an off-by-default setting a way to make parks fail.
+        let imagesStarted = Date()
+        var imageNotes: [String] = []
+        // Volumes the unmount loop must not attempt: either their pinning
+        // image would not let go, or they belong to an image that is now
+        // detached and whose device no longer exists.
+        var skipVolumes: Set<String> = []
+        let attachedImages = readAttachedImages()
+        if let attachedImages, !attachedImages.isEmpty {
+            for disk in disks {
+                for volume in disk.allVolumes
+                where volume.isMounted && !Preferences.isIgnored(volume.uuid) {
+                    guard let mountPoint = volume.mountPoint else { continue }
+                    let pinning = imagesBacked(byVolumeAt: resolvedPath(mountPoint),
+                                               in: attachedImages)
+                    for image in pinning {
+                        progress("Detaching disk image \(image.imagePath)")
+                        // The image's own volumes come down first. DADiskEject
+                        // on the whole disk with them still mounted answers
+                        // busy; `diskutil eject` only looks like one step
+                        // because it does this first. Force inherits here,
+                        // under the same contract as everywhere else: one-shot,
+                        // asked for by name, never reachable from a trigger.
+                        var refusal: String?
+                        for entity in image.mountedVolumes {
+                            let result = ops.unmount(volumeBSDName: entity, force: force)
+                            if !result.success {
+                                refusal = result.detail ?? "unknown"
+                                break
+                            }
+                        }
+                        if refusal == nil {
+                            let result = ops.eject(diskBSDName: image.wholeDisk)
+                            if !result.success { refusal = result.detail ?? "unknown" }
+                        }
+                        if let refusal {
+                            skipVolumes.insert(volume.device)
+                            // Name what is open inside the image. "Preview
+                            // (pid 900)" is something a human can act on;
+                            // "DA status 0xc010" is not.
+                            let inside = image.mountPoints
+                                .flatMap { lsofBlockers(mountPoint: $0) }
+                            let held = inside.isEmpty ? refusal : inside.joined(separator: ", ")
+                            imageNotes.append("\(image.imagePath): still attached, held by \(held). It is backed by a file on \(volume.displayName), so that volume cannot unmount until the image lets go.")
+                        } else {
+                            skipVolumes.formUnion(image.mountedVolumes)
+                            imageNotes.append("\(image.imagePath): disk image detached, it was backed by a file on \(volume.displayName)")
+                        }
+                    }
+                }
+            }
+        } else if attachedImages == nil {
+            imageNotes.append("Could not read attached disk images: hdiutil did not answer. An image backed by one of these drives would dissent its unmount without being named.")
+        }
+        timing.diskImages = Date().timeIntervalSince(imagesStarted)
+
         // Force does not climb the retry ladder. The ladder exists to wait a
         // blocker out; force refuses to wait, so retrying it is just repeating
         // the same violence.
@@ -186,7 +255,8 @@ public final class Engine {
             DispatchQueue.concurrentPerform(iterations: disks.count) { diskIndex in
                 let disk = disks[diskIndex]
                 for (volumeIndex, volume) in disk.allVolumes.enumerated()
-                where volume.isMounted && !Preferences.isIgnored(volume.uuid) {
+                where volume.isMounted && !Preferences.isIgnored(volume.uuid)
+                    && !skipVolumes.contains(volume.device) {
                     let result = Self.unmountWithRetries(
                         volume, ops: ops, ladder: ladder, deadline: deadline,
                         force: force, progress: report)
@@ -212,7 +282,7 @@ public final class Engine {
 
         timing.verify = Date().timeIntervalSince(verifyStarted)
 
-        var notes: [String] = []
+        var notes: [String] = imageNotes
         for volume in skipped {
             notes.append("\(volume.displayName): left alone, on the ignore list")
         }

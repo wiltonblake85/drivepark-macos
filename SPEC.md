@@ -636,3 +636,132 @@ proving the migration needed one.
 Left as written: the dated entries above, `.attic/`, and commit messages. They
 quote what actually printed at the time, and rewriting evidence to match a
 vocabulary change would make the record less true, not more consistent.
+
+### A disk image backed by a managed drive, SHIPPED AND VERIFIED 2026-09-09
+
+Nothing in the codebase knows disk images exist once discovery is done.
+`grep -i image Sources/DriveParkKit/Blockers.swift Sources/DriveParkKit/Engine.swift`
+returns nothing. That is fine for the case the `images` setting covers, and
+wrong for the case underneath it.
+
+A .dmg attached from a file that lives on a managed volume pins that volume.
+The park fails, the retry ladder spends its full 17 seconds failing, and the
+blocker line names whichever helper process holds the backing file. That is a
+true sentence and a useless one: nobody can act on `diskimages-helper (pid
+812)` the way they can act on Preview. The actionable fact is that
+`/Volumes/Backup/scratch.dmg` is attached, and DrivePark never says it.
+
+**This is not the `images` setting and must not be gated on it.** That setting
+answers whether a mounted .dmg counts as a parkable drive, and the answer is
+still no by default, for the reason already recorded above: whether the
+enclosure is safe to unplug should not change because a .dmg happens to be
+open. This answers a different question, whether an attached image stands
+between a managed drive and being safe to unplug. Gating the detach on
+`Preferences.includeDiskImages` would turn an off-by-default setting into a way
+to make parks fail, which is the opposite of what off means.
+
+**Detection.** `hdiutil info -plist` returns an `images` array. Each entry
+carries `image-path` (the backing file), `hdid-pid`, and `system-entities`,
+each entity having a `dev-entry` and, for the mounted one, a `mount-point`.
+Shape verified on the tower 2026-09-09 against the one image attached at the
+time, `/Users/blake/Downloads/SlowBooksPro-macos-arm64.dmg`, entities
+`/dev/disk10`, `/dev/disk10s1`, `/dev/disk11`, `/dev/disk11s1`, mounted at
+`/Volumes/SlowBooks Pro`.
+
+An image is in the way of volume V when its `image-path` sits under V's mount
+point. Match on the mount point plus a trailing slash, so `/Volumes/Backup`
+does not swallow `/Volumes/Backup2`, and resolve symlinks on both sides first,
+because a backing file reached through a link still pins the volume it actually
+lives on.
+
+**Ordering: before the unmount loop, not inside the retry ladder.** The ladder
+exists to wait a blocker out, and an attached image will never time out on its
+own. Putting the detach in the ladder would only pay 17 seconds to learn that.
+So `Engine.park` resolves images after discovery and before the concurrent
+unmount, sequentially, since there are few of them and the point is that they
+are gone before the first unmount is solicited.
+
+**What it does.** Unmounts the image's own volumes, then ejects its outermost
+whole disk, both through the Disk Arbitration session the engine already holds.
+No shelling out to hdiutil for the action, and `hdiutil detach` is deprecated on
+this macOS anyway; hdiutil is read-only here, for `info -plist`.
+
+**The order matters and cost one failed end-to-end run to learn.** `DADiskEject`
+on the whole disk with the image's volume still mounted comes back busy, DA
+status 0xc010. The first build did exactly that and reported "still attached"
+against an image with nothing open in it. `diskutil eject` looks like a
+one-step detach only because it unmounts the volumes first, and so must this.
+Unit tests could not have caught it: the matcher was right, the sequence was
+wrong, and only real hardware says so.
+
+Polite by default. Force here would tear down a filesystem with open files,
+which is exactly what park refuses to do unless a human asks for it by name.
+When park itself runs with `--force`, the unmount of the image's volumes
+inherits it, under the same contract as everywhere else: one-shot, human-asked,
+never reachable from a trigger.
+
+A refusal stops the unmount of that volume rather than proceeding into a park
+that cannot succeed, and names what is open inside the image by running the
+existing `lsofBlockers` against the image's own mount point. "held by Python
+(pid 31388)" is actionable; "DA status 0xc010" is not.
+
+**The ignore list still wins.** An image backed by a file on an ignored volume
+is left attached. That volume is not being unmounted, so nothing is in the way,
+and the ignore list is absolute.
+
+**Detached images are not reattached on `park mount`.** DrivePark's job stops
+at the drives. Reattaching would put an installer volume back on the desktop
+after a wake, which nobody asked for. Same instinct as not undoing the courtesy
+spin-down: report what happened and let the human decide.
+
+**Reporting.** One note per detached image in `ParkOutcome.notes`, in the
+existing vocabulary of "left alone, on the ignore list" and "left spinning":
+`<path>: disk image detached, it was backed by a file on <volume>`. `park
+status` should name an image that is in the way, so a park failure is predicted
+instead of discovered.
+
+**Shape.** A new `DiskImages.swift` in DriveParkKit: read `hdiutil info -plist`
+into a small struct, plus a matcher from (images, mount point) to the entries in
+the way. The matcher is a pure function of a plist fixture and a path, so it is
+testable with no hardware, the way `OverrideParsingTests` already tests the
+override parser. `Engine.park` calls it; `Blockers.swift` stays as it is, since
+this is not an lsof question.
+
+**Non-goal.** DrivePark does not manage disk images. No listing, no attaching,
+no eject-every-dmg command. It detaches an image only when that image stands
+between a managed drive and being safe to unplug.
+
+**Measured on the tower 2026-09-09**, scratch APFS image on /Volumes/Backup.
+
+The pin is real and fails fast, not slow: `diskutil unmount /Volumes/Backup`
+returned `dissented by PID 29138 (diskimages-helper)` in 0.28s. Nothing hangs,
+and nothing clears either, which is what makes the retry ladder the wrong place
+for it.
+
+The blocker string really is unactionable. `lsof -Fpc +f`, exactly as
+Blockers.swift calls it, answered `p29138 / cdiskimages-helper` and nothing
+else. Worth noting for later: plain `lsof +f` prints the backing path in its
+NAME column, so the current code is throwing away the useful field by asking
+only for `p` and `c`. Adding `n` to that format string would improve every
+blocker message, image or not. Not done here, because it is a separate change
+with its own failure modes.
+
+A polite detach against a busy image fails cleanly, no hang: `hdiutil detach`
+returned `couldn't unmount "disk13" - Resource busy`, rc 16, in 0.86s, and
+`diskutil eject` refused in 0.87s while naming the dissenting process, which is
+the better message and the reason the implementation reports the holder.
+
+End to end, four paths, all through the release CLI:
+
+- `park status` printed the image and the volume it sits on before any park ran.
+- Idle image: detached in 0.40s, Backup unmounted in 0.19s on the first
+  attempt, PARKED. `2.14s total (discover 0.80, images 0.40, unmount 0.19,
+  verify 0.74, spin-down 0.01)`. The same park before this change failed.
+- File held open inside the image: refused, `still attached, held by Python
+  (pid 31388)`, and the run reported NOT PARKED rather than claiming a park it
+  did not achieve.
+- `--force` with that same file open: image volume torn down, image detached,
+  Backup parked in 2.14s.
+
+Machine left as found: scratch image and its folder deleted, all three volumes
+remounted.
