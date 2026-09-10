@@ -164,7 +164,8 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
     // volume twice and offer to eject a container.
     //
     // So the wide list is a candidate list, not an answer. Each candidate is
-    // kept only if diskutil calls it a Disk Image, which costs nothing extra
+    // kept only if diskutil calls it a Disk Image and it is not a synthesized
+    // container (see below), which costs nothing extra
     // because the info call below already runs for every disk.
     //
     // `external` itself is never relaxed. It is the one thing keeping the boot
@@ -195,7 +196,20 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
           let allEntries = fullList["AllDisksAndPartitions"] as? [[String: Any]]
     else { return [] }
 
+    // Every APFS synthesized container, whatever it sits on. The protocol
+    // filter below was trusted to keep these out, and for the tower's own
+    // containers it does. For a container inside a disk image it does not:
+    // measured 2026-09-10, disk11, the container inside the iOS 26.2 Simulator
+    // image disk10, reports Protocol: Disk Image exactly like its parent. It
+    // was admitted as a whole disk with no volumes of its own, which is what
+    // put eight blank "— ignored" rows in the menu.
+    let synthesized = Set(allEntries.compactMap { entry -> String? in
+        guard entry["APFSPhysicalStores"] != nil else { return nil }
+        return entry["DeviceIdentifier"] as? String
+    })
+
     var disks: [String: PhysicalDisk] = [:]
+
     for device in externalSet.sorted() {
         var disk = PhysicalDisk(device: device)
         if let info = runDiskutil(["info", "-plist", device]) {
@@ -214,7 +228,8 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
         // enclosure that will not answer an info query is not evidence of
         // either, so it does not get the benefit of the doubt.
         if imageCandidates.contains(device),
-           !(disk.infoAnswered && disk.busProtocol == "Disk Image") {
+           synthesized.contains(device)
+            || !(disk.infoAnswered && disk.busProtocol == "Disk Image") {
             continue
         }
         disks[device] = disk
@@ -273,5 +288,49 @@ public func discoverExternalDisks() -> [PhysicalDisk] {
             physicalStore: firstStore,
             volumes: volumes))
     }
+    // Images macOS attached for its own use are never a drive, with the
+    // setting on or off. Measured 2026-09-10: Xcode keeps eight simulator
+    // runtimes attached, 17 GB each, mounted under
+    // /Library/Developer/CoreSimulator/Volumes. With images on they counted as
+    // eight of eleven volumes, every park tried to unmount them out from under
+    // CoreSimulator, and every park failed on them. Nothing a person does
+    // about the tower changes whether they are attached, so they have no
+    // business in the safe-to-unplug answer.
+    if !imageCandidates.isEmpty {
+        let backing = readAttachedImages() ?? []
+        for device in imageCandidates {
+            guard let disk = disks[device] else { continue }
+            let path = backing.first { $0.wholeDisk == device }?.resolvedImagePath
+            let points = disk.allVolumes.compactMap { $0.mountPoint }
+            if isSystemManagedImage(backingPath: path, mountPoints: points) {
+                disks[device] = nil
+            }
+        }
+    }
     return disks.keys.sorted().compactMap { disks[$0] }
+}
+
+/// Where macOS keeps disk images it attaches for itself. Simulator runtimes
+/// live under the first two on this Mac: Xcode 26 downloads them as
+/// MobileAssets under /System/Library/AssetsV2, and older runtimes sit in
+/// /Library/Developer/CoreSimulator/Images.
+let systemImagePrefixes = ["/System/", "/Library/Developer/CoreSimulator/"]
+
+/// True for a disk image the system attached for its own use rather than one a
+/// person opened.
+///
+/// Two independent signals, either one enough. The backing path says who owns
+/// the file. The mount point says who mounted the volume: a .dmg a person
+/// opens mounts under /Volumes, and one mounted anywhere else was put there by
+/// something that expects it to stay. The second signal still works when
+/// hdiutil does not answer, which is why the path is optional.
+///
+/// An image with nothing mounted and no known backing path stays in. That is
+/// a parked .dmg, and dropping it would hide the Mount action for it.
+public func isSystemManagedImage(backingPath: String?, mountPoints: [String]) -> Bool {
+    if let backingPath,
+       systemImagePrefixes.contains(where: { backingPath.hasPrefix($0) }) {
+        return true
+    }
+    return mountPoints.contains { !$0.hasPrefix("/Volumes/") }
 }

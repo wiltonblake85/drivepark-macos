@@ -765,3 +765,31 @@ End to end, four paths, all through the release CLI:
 
 Machine left as found: scratch image and its folder deleted, all three volumes
 remounted.
+
+### System disk images are never a drive, BUILT AND TESTED 2026-09-10
+
+With images switched on, Xcode's eight simulator runtimes (17 GB each, backed
+under /System/Library/AssetsV2, mounted under
+/Library/Developer/CoreSimulator/Volumes) counted as eight of eleven volumes.
+Every park tried to unmount them out from under CoreSimulator and failed on
+them, so every park ended "Not parked. Still mounted: iOS 26.2 Simulator...".
+
+Two defects, both in `discoverExternalDisks`:
+
+- **Phantom rows.** The protocol filter was trusted to keep synthesized APFS
+  containers out. It does for the tower's own containers. It does not for a
+  container inside an image: disk11, inside image disk10, reports Protocol: Disk
+  Image like its parent. It was admitted as a whole disk with no volumes, and the
+  menu rendered each one as a blank "— ignored" row. Candidates that carry
+  `APFSPhysicalStores` in `diskutil list` are now skipped.
+- **System images admitted.** `isSystemManagedImage` drops an image when its
+  backing file is under /System/ or /Library/Developer/CoreSimulator/, or when
+  any of its volumes is mounted outside /Volumes/. Either signal is enough; the
+  mount point still decides when hdiutil does not answer. An image with nothing
+  mounted and no known path stays in, so a parked .dmg keeps its Mount action.
+
+Applies with the setting on or off, the same way the ignore list is absolute.
+Verified with `park status` from the debug build against the live tower, images
+on: 3 disks, "Safe to power off"; the installed release build listed all 8
+simulators. 29 of 29 tests pass (6 new in SystemImageTests). Discovery time
+unchanged at ~5.3s with images on; the extra hdiutil call is 0.02s.
