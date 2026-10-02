@@ -236,10 +236,22 @@ public final class Engine {
         // times. Within a disk the volumes stay sequential; two flushes
         // contending for one spindle would only slow each other.
         //
-        // Spin-down stays sequential. Measured at 0.03 s for all three
-        // bays, so there is nothing to win, and the TerraMaster bridge that
+        // 2026-10-02, Ejectify long gone, the same ~10.6 s timeout was back,
+        // and only when Bottom Drawer or Plex was in the park. Spotlight
+        // indexing was on for those two and off for Backup. Every
+        // mdworker_shared that Spotlight launches registers an unmount and an
+        // eject approval callback (16 of 16 registrations in one minute landed
+        // 30 to 60 ms after an mdworker spawn), and a worker busy importing
+        // does not answer. The stalled approval holds every queued unmount,
+        // so one indexed volume slowed the whole park. DrivePark cannot answer
+        // for another process. Excluding the two volumes in Spotlight's Search
+        // Privacy fixed it: four tower parks through the app at 2.65 to
+        // 3.00 s, no "not responding" (SPEC section 10, 2026-10-02).
+        //
+        // Spin-down stays sequential, and only touches disks this run
+        // unmounted (see spinDownDecision). The TerraMaster bridge that
         // stopped answering every bay at once on 2026-08-31 is not a thing
-        // to send three STOP UNIT commands to for no gain.
+        // to send three STOP UNIT commands to at once.
         let unmountStarted = Date()
         let lock = NSLock()
         var indexedResults: [(disk: Int, volume: Int, result: VolumeParkResult)] = []
@@ -270,6 +282,11 @@ public final class Engine {
         let results = indexedResults
             .sorted { ($0.disk, $0.volume) < ($1.disk, $1.volume) }
             .map { $0.result }
+        // The disks this run actually took a volume off. Only these get the
+        // courtesy spin-down; see spinDownDecision for why.
+        let unmountedThisRun = Set(indexedResults
+            .filter { $0.result.success }
+            .map { disks[$0.disk].device })
 
         timing.unmount = Date().timeIntervalSince(unmountStarted)
 
@@ -288,16 +305,16 @@ public final class Engine {
         }
 
         let spinStarted = Date()
-        // Courtesy spin-down, but never for a disk carrying a mounted volume
-        // we were told to leave alone. Spinning down the disk under an ignored
-        // volume would break exactly the promise the ignore list makes.
         for disk in after {
-            let anyMounted = disk.allVolumes.contains { $0.isMounted }
-            guard !anyMounted else {
-                if disk.allVolumes.contains(where: { $0.isMounted && Preferences.isIgnored($0.uuid) }) {
-                    notes.append("\(disk.device): left spinning, it carries an ignored volume that is still mounted")
-                }
+            switch Self.spinDownDecision(for: disk, unmountedThisRun: unmountedThisRun,
+                                         isIgnored: Preferences.isIgnored) {
+            case .notThisRun, .stillMounted:
                 continue
+            case .leftSpinningForIgnored:
+                notes.append("\(disk.device): left spinning, it carries an ignored volume that is still mounted")
+                continue
+            case .send:
+                break
             }
             let result = ops.eject(diskBSDName: disk.device)
             let attached = ops.isAttached(diskBSDName: disk.device)
@@ -331,6 +348,49 @@ public final class Engine {
         }
         return ParkOutcome(results: results, stillMounted: stillMounted,
                            notes: notes, timing: timing)
+    }
+
+    enum SpinDownDecision: Equatable {
+        /// Send the courtesy eject.
+        case send
+        /// Not unmounted by this run: parked earlier, or never mounted.
+        case notThisRun
+        /// Something this run manages is still mounted on it; the park failed
+        /// there and the report already says so.
+        case stillMounted
+        /// An ignored volume is still mounted on it.
+        case leftSpinningForIgnored
+    }
+
+    /// Whether a disk gets the courtesy spin-down after a park.
+    ///
+    /// Only a disk this run took a volume off. Measured on the tower
+    /// 2026-10-02: the eject was going to every disk in the tower with nothing
+    /// mounted, including bays parked by an earlier run and long since asleep
+    /// under disksleep. DADiskEject on a sleeping drive spins it up first, so
+    /// a tower park with Backup mounted and the other two already parked spent
+    /// 18.4 to 18.6 s in spin-down (Bottom Drawer 8.2, Plex 10.2, in sequence)
+    /// against 0.3 s of unmount. Three runs, same numbers. A disk this run
+    /// just unmounted is awake by definition, so its eject costs ~1 ms.
+    ///
+    /// Limited this way, the spin-down also started working. Under the old
+    /// rule Backup remounted in 0.87 s about 90 s after its spin-down, twice,
+    /// because the ejects that woke the other two bays came after it. With
+    /// only the bays this run unmounted getting the eject, all three stay
+    /// down: the next mount pays full spin-up (Backup 12.4 s, Bottom Drawer
+    /// 8.7, Plex 10.4), three cycles out of three.
+    ///
+    /// Never for a disk carrying a mounted volume we were told to leave alone:
+    /// spinning down the disk under an ignored volume would break exactly the
+    /// promise the ignore list makes.
+    static func spinDownDecision(for disk: PhysicalDisk,
+                                 unmountedThisRun: Set<String>,
+                                 isIgnored: (String?) -> Bool) -> SpinDownDecision {
+        guard unmountedThisRun.contains(disk.device) else { return .notThisRun }
+        let mounted = disk.allVolumes.filter { $0.isMounted }
+        if mounted.isEmpty { return .send }
+        if mounted.contains(where: { isIgnored($0.uuid) }) { return .leftSpinningForIgnored }
+        return .stillMounted
     }
 
     /// Climbs the retry ladder for one volume. Pure function of its inputs

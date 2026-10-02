@@ -55,7 +55,8 @@ DISCOVER -> UNMOUNT -> VERIFY -> PARK (hold) -> REPORT, plus UNPARK.
    automount of managed volume UUIDs while parked. This is the feature the
    incumbents lack: it keeps a re-presenting bridge from silently remounting.
    Additionally attempt a physical-disk eject as a courtesy spin-down (many
-   fixed-media bridges spin drives down on STOP UNIT) and report its true
+   fixed-media bridges spin drives down on STOP UNIT), only on disks this run
+   unmounted a volume on (field test 2026-10-02), and report its true
    effect honestly: "spun down" or "no effect", never "ejected" unless the
    device actually detached on re-read.
 5. REPORT. Single line of truth: "Tower parked. Safe to power off." or the
@@ -793,3 +794,58 @@ Verified with `park status` from the debug build against the live tower, images
 on: 3 disks, "Safe to power off"; the installed release build listed all 8
 simulators. 29 of 29 tests pass (6 new in SystemImageTests). Discovery time
 unchanged at ~5.3s with images on; the extra hdiutil call is 0.02s.
+
+### Park is 12 to 20 s: one defect, one Spotlight setting, FIXED 2026-10-02
+
+Wekesa asked why a park takes 12 to 20 s when the unmount itself should be a
+few. Measured through the installed app unless marked CLI, pmset disksleep 10,
+Ejectify not running:
+
+| Run | Unmount | Spin-down | Total |
+|---|---|---|---|
+| Bottom Drawer only, real use, 12:41 | 11.08 s | 0.03 s | 12.30 s |
+| Tower, Backup mounted, other two parked, 12:51 / 13:05 / 13:06 | 0.29 to 0.49 s | 18.38 to 18.59 s | 19.71 to 20.13 s |
+| Spin-down fix installed. Tower, 13:56 / 14:02 | 12.64 / 14.90 s | 0.09 / 0.13 s | 15.64 / 16.51 s |
+| Bottom Drawer and Plex excluded from Spotlight at 14:08:06 and 14:08:19. Tower, 14:08:44 | 10.66 s | 0.03 s | 12.46 s |
+| CLI, Plex alone / Bottom Drawer alone, 14:10 | 0.84 / 0.65 s | 0.01 s | 2.48 / 2.25 s |
+| Backup alone, 14:12 | 15.15 s, 2 attempts | 0.01 s | 16.18 s |
+| Tower, four runs 14:13 to 14:17 | 1.56 to 1.78 s | 0.03 to 0.06 s | 2.65 to 3.00 s |
+
+**Defect: the courtesy spin-down woke drives that were already parked.**
+`Engine.park` sent the eject to every disk in scope with nothing mounted,
+including bays an earlier run had parked and that had gone to sleep.
+DADiskEject on a sleeping drive spins it up first: 8.2 s then 10.2 s, in
+sequence, every run. Now only a disk this run unmounted a volume on gets it.
+`Engine.spinDownDecision(for:unmountedThisRun:isIgnored:)` is the rule, pure and
+tested: `.send`, `.notThisRun`, `.stillMounted`, `.leftSpinningForIgnored`. 34 of
+34 tests pass (5 new in SpinDownTests). Mutation: deleting the `.notThisRun`
+guard fails 2 of them, including the tower scenario. Installed with
+build-app.sh.
+
+The fix also made the spin-down work. Under the old rule Backup remounted in
+0.87 s about 90 s after its eject, twice, so it looked as if this bridge ignored
+STOP UNIT. It was the later ejects, waking the other two bays, that brought it
+back. Now all three stay down: three mounts after a park paid full spin-up
+(Backup 12.4 s, Bottom Drawer 8.7, Plex 10.4).
+
+**Setting: Spotlight indexing on Bottom Drawer and Plex.** The ~10.6 s
+diskarbitrationd "not responding" timeout fired only when Bottom Drawer or
+Plex was in the park, awake or asleep. `mdutil -s` showed indexing on for those
+two and off for Backup. Every mdworker_shared that Spotlight launches registers
+an unmount and an eject approval callback: 16 of 16 registrations between
+13:55:20 and 13:56:20 landed 30 to 60 ms after an mdworker spawn. A worker busy
+importing does not answer, and the stalled approval holds every queued unmount,
+so Backup waited too. mds itself answered in under 0.4 s. A first reading
+blamed disk spin-up, because a 64 KB read from idle Backup took 12.00 s; the
+13:56 and 14:02 runs on awake drives disproved it.
+
+Wekesa excluded both volumes in System Settings, Spotlight, Search Privacy (mds
+logged `generalExclusion:1` for each). Changing it from this side was refused by
+the session's permission check, so it is a setting he owns. Afterward, four
+tower parks through the app: 2.65 to 3.00 s, no "not responding". The 14:08:44
+park, 25 s after the exclusion, still stalled while mds was closing the stores.
+The 14:12 Backup-alone stall (approval answered at 12.4 s, "orphaned", unmount
+failed busy 0xC010, cleared on the +2 s rung) is not explained; it fell inside
+the same few minutes. If a stall returns, the trace to run is the
+`not responding` / `orphaned` query in the diskarbitrationd log with an lsof on
+the mount points during the wait (the 14:13 to 14:17 harness did exactly that).
