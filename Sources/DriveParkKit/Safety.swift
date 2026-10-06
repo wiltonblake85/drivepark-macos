@@ -68,11 +68,12 @@ public struct UnaccountedMount: Equatable, Sendable {
     }
 
     public var sentence: String {
+        let point = printable(mountPoint)
         switch why {
         case .onDiscoveredDisk:
-            return "\(mountPoint) (\(device)) is mounted on an external disk but discovery did not list it"
+            return "\(point) (\(device)) is mounted on an external disk but discovery did not list it"
         case .unattributed:
-            return "\(mountPoint) (\(device)) is mounted and DrivePark cannot tell which drive it lives on"
+            return "\(point) (\(device)) is mounted and DrivePark cannot tell which drive it lives on"
         }
     }
 }

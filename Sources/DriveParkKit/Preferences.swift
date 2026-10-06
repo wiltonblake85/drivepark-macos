@@ -223,22 +223,49 @@ public enum Preferences {
         set { store.set(newValue, forKey: includeImagesKey) }
     }
 
-    /// Whether the current park came from a trigger rather than a click.
+    /// The volumes automatic parks took down, by UUID, waiting for the wake
+    /// that undoes them.
     ///
-    /// Persisted, because it decides whether the next wake remounts, and it
-    /// used to live only in a TriggerCoordinator field. Any restart between the
-    /// park and the wake reset it to false, and the wake then declined to
-    /// remount and said nothing: the drives stayed parked and the user was left
-    /// to work out why. Watched happen on 2026-09-04, when a rebuild landed
-    /// between a screen-lock park and the unlock.
+    /// Persisted, because it decides what the next wake remounts, and it used
+    /// to live only in a TriggerCoordinator field. Any restart between the
+    /// park and the wake reset it, and the wake then declined to remount and
+    /// said nothing: the drives stayed parked and the user was left to work
+    /// out why. Watched happen on 2026-09-04, when a rebuild landed between a
+    /// screen-lock park and the unlock. A restart in that window is not
+    /// exotic. The watchdog relaunches after a crash, and an update replaces
+    /// the app, and both are exactly the moments where quietly forgetting to
+    /// remount is worst.
     ///
-    /// A restart in that window is not exotic. The watchdog relaunches after a
-    /// crash, and an update replaces the app, and both are exactly the moments
-    /// where quietly forgetting to remount is worst.
+    /// A set of volumes rather than a yes or no since 2026-10-06. The flag
+    /// said only that a trigger had parked, so the wake mounted everything and
+    /// dropped the whole veto, and a drive parked by hand came back with the
+    /// rest. Parking or mounting by hand takes volumes out of this set.
+    private static let triggerParkedKey = "triggerParkedVolumeUUIDs"
+    public static var triggerParkedVolumeUUIDs: Set<String> {
+        get { Set(store.stringArray(forKey: triggerParkedKey) ?? []) }
+        set {
+            if newValue.isEmpty {
+                store.removeObject(forKey: triggerParkedKey)
+            } else {
+                store.set(newValue.sorted(), forKey: triggerParkedKey)
+            }
+        }
+    }
+
+    /// The old flag, from builds before 2026-10-06. Still read once: a trigger
+    /// park made by an old build and woken under a new one would otherwise be
+    /// left parked, which is the 2026-09-04 failure over again. It names no
+    /// volumes, so that one wake mounts everything, as it always did.
     private static let parkedByTriggerKey = "parkedByTrigger"
-    public static var parkedByTrigger: Bool {
+    public static var legacyParkedByTrigger: Bool {
         get { store.bool(forKey: parkedByTriggerKey) }
-        set { store.set(newValue, forKey: parkedByTriggerKey) }
+        set {
+            if newValue {
+                store.set(true, forKey: parkedByTriggerKey)
+            } else {
+                store.removeObject(forKey: parkedByTriggerKey)
+            }
+        }
     }
 
     private static let ignoredKey = "ignoredVolumeUUIDs"

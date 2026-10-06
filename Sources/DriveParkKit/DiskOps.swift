@@ -102,7 +102,8 @@ final class DiskOps: DiskOperating {
         let box = Unmanaged<CallbackBox>.fromOpaque(context).takeRetainedValue()
         if let dissenter {
             let status = DADissenterGetStatus(dissenter)
-            let reason = (DADissenterGetStatusString(dissenter) as String?) ?? ""
+            // Written by whichever process dissented, so it is outside text.
+            let reason = printable((DADissenterGetStatusString(dissenter) as String?) ?? "")
             let busy = UInt32(bitPattern: status) == UInt32(truncatingIfNeeded: kDAReturnBusy)
             let hex = String(UInt32(bitPattern: status), radix: 16)
             let detail = reason.isEmpty ? "DA status 0x\(hex)" : "\(reason) (0x\(hex))"

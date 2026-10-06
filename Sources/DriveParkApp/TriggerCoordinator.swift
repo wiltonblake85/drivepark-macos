@@ -9,8 +9,11 @@
 //                  stable for years; if it ever stops firing the other two
 //                  triggers are unaffected.
 //
-// Auto-mount only ever undoes an auto-park. A drive the user parked by hand
-// stays parked through a wake cycle, because they had a reason.
+// Auto-mount only ever undoes an auto-park, volume by volume. A drive the user
+// parked by hand stays parked through a wake cycle, because they had a reason.
+// AppState records what each automatic park took down
+// (Preferences.triggerParkedVolumeUUIDs) and takes volumes back out of that
+// record when a person parks or mounts them.
 
 import Foundation
 import AppKit
@@ -22,16 +25,6 @@ final class TriggerCoordinator {
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var distributedObservers: [NSObjectProtocol] = []
     private var pendingMount: DispatchWorkItem?
-
-    /// True only when the most recent park came from a trigger, not a click.
-    ///
-    /// Backed by preferences rather than a field, so it survives the app being
-    /// restarted between the park and the wake. See Preferences.parkedByTrigger
-    /// for what that cost on 2026-09-04.
-    var parkedByTrigger: Bool {
-        get { Preferences.parkedByTrigger }
-        set { Preferences.parkedByTrigger = newValue }
-    }
 
     weak var state: AppState?
 
@@ -99,8 +92,7 @@ final class TriggerCoordinator {
         // the Mac still sleeps on schedule instead of stalling at the lid.
         DispatchQueue.global().asyncAfter(deadline: .now() + budget + 2) { allow() }
 
-        parkedByTrigger = true
-        Preferences.recordDiagnostic("wakeArm", "systemSleep park, parkedByTrigger set")
+        Preferences.recordDiagnostic("wakeArm", "systemSleep park started")
         state.park(trigger: .systemSleep, deadline: deadline) { _ in allow() }
     }
 
@@ -108,8 +100,7 @@ final class TriggerCoordinator {
         guard Preferences.isEnabled(trigger), let state, !state.volumes.isEmpty else { return }
         guard !state.nothingToPark else { return }
         pendingMount?.cancel()
-        parkedByTrigger = true
-        Preferences.recordDiagnostic("wakeArm", "\(trigger.rawValue) park, parkedByTrigger set")
+        Preferences.recordDiagnostic("wakeArm", "\(trigger.rawValue) park started")
         state.park(trigger: trigger, deadline: nil, completion: nil)
     }
 
@@ -123,13 +114,17 @@ final class TriggerCoordinator {
             Preferences.recordDiagnostic("wake", "\(reason): auto-mount is off")
             return
         }
-        guard parkedByTrigger else {
-            Preferences.recordDiagnostic(
-                "wake", "\(reason): the park did not come from a trigger, leaving it parked")
+        guard let state else {
+            Preferences.recordDiagnostic("wake", "\(reason): no app state")
             return
         }
-        guard state != nil else {
-            Preferences.recordDiagnostic("wake", "\(reason): no app state")
+        // An automatic park still running counts: a wake that lands during it
+        // waits for it, then mounts what it took down.
+        guard state.triggerParkRunning
+                || !Preferences.triggerParkedVolumeUUIDs.isEmpty
+                || Preferences.legacyParkedByTrigger else {
+            Preferences.recordDiagnostic(
+                "wake", "\(reason): nothing an automatic park took down is waiting, leaving any parked drive parked")
             return
         }
         Preferences.recordDiagnostic("wake", "\(reason): mounting in \(Int(Preferences.wakeMountDelay))s")
@@ -137,9 +132,8 @@ final class TriggerCoordinator {
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, let state = self.state else { return }
-                self.parkedByTrigger = false
                 Preferences.recordDiagnostic("wake", "\(reason): mount running now")
-                state.mount(reason: reason)
+                state.mountAfterWake(reason: reason)
             }
         }
         pendingMount = work
@@ -147,12 +141,6 @@ final class TriggerCoordinator {
         // window fails, and a failed remount reads as a broken app.
         DispatchQueue.main.asyncAfter(deadline: .now() + Preferences.wakeMountDelay,
                                       execute: work)
-    }
-
-    /// A manual park should not be undone by the next wake.
-    func noteManualPark() {
-        parkedByTrigger = false
-        pendingMount?.cancel()
     }
 
     deinit {

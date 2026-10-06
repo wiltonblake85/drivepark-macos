@@ -27,6 +27,9 @@ public struct AttachedImage: Equatable {
     /// The backing file as hdiutil reports it. This is what gets printed,
     /// because it is the sentence a human can act on.
     public let imagePath: String
+    /// The path for showing to a person, with anything that could forge a
+    /// line escaped. A file name is whatever whoever made the file chose.
+    public var displayPath: String { printable(imagePath) }
     /// The same path with symlinks resolved. Matching happens on this: a
     /// backing file reached through a link still pins the volume it actually
     /// lives on.

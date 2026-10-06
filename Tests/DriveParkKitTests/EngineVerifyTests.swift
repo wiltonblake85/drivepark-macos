@@ -333,6 +333,79 @@ final class EngineVerifyTests: XCTestCase {
         XCTAssertEqual(ops.events, [])
     }
 
+    // MARK: - Mount on wake undoes only what was named
+
+    func testWakeMountTouchesOnlyTheVolumesItWasGiven() {
+        // Backup was taken down by a screen-lock park. Bottom Drawer and Plex
+        // were parked by hand and must stay parked, with their veto up.
+        let discovery = FakeDiscovery([.success(Tower.snapshot()),
+                                       .success(Tower.snapshot(mounted: [Tower.backup]))])
+        let ops = FakeOps()
+        ops.vetoedVolumeUUIDs = Tower.all
+        let outcome = engine(discovery, ops).mount(volumeUUIDs: [Tower.backup.uppercased()])
+
+        XCTAssertEqual(ops.events.filter { $0.hasPrefix("mount") }, ["mount disk26s1"])
+        XCTAssertEqual(ops.vetoedVolumeUUIDs, [Tower.bottomDrawer, Tower.plex])
+        XCTAssertNil(outcome.failure)
+        XCTAssertEqual(outcome.mountedCount, 1)
+        XCTAssertEqual(outcome.total, 1)
+    }
+
+    func testWakeMountLeavesTheOtherVolumeOnTheSameDiskParked() {
+        // Same disk, two volumes: the automatic park took down Backup, and
+        // Scratch was parked by hand. Mounting "the disk Backup is on" would
+        // bring Scratch back too.
+        func bay(_ mounted: Bool) -> DiskSnapshot {
+            var disk = PhysicalDisk(device: "disk25")
+            disk.containers = [Container(device: "disk26", physicalStore: "disk25s2", volumes: [
+                Volume(device: "disk26s1", name: "Backup",
+                       mountPoint: mounted ? "/Volumes/Backup" : nil, uuid: Tower.backup),
+                Volume(device: "disk26s2", name: "Scratch", mountPoint: nil, uuid: "scratch-uuid"),
+            ])]
+            return DiskSnapshot(disks: [disk])
+        }
+        let discovery = FakeDiscovery([.success(bay(false)), .success(bay(true))])
+        let ops = FakeOps()
+        ops.vetoedVolumeUUIDs = [Tower.backup, "scratch-uuid"]
+        let outcome = engine(discovery, ops).mount(volumeUUIDs: [Tower.backup])
+
+        XCTAssertEqual(ops.events.filter { $0.hasPrefix("mount") }, ["mount disk26s1"])
+        XCTAssertEqual(ops.vetoedVolumeUUIDs, ["scratch-uuid"])
+        XCTAssertEqual(outcome.total, 1)
+        XCTAssertEqual(outcome.mountedCount, 1)
+    }
+
+    func testWakeMountOfAVolumeNoLongerAttachedCountsItAsNotMounted() {
+        let withoutBackup = Tower.bays.filter { $0.uuid != Tower.backup }
+        let discovery = FakeDiscovery([.success(Tower.snapshot(bays: withoutBackup))])
+        let ops = FakeOps()
+        let outcome = engine(discovery, ops).mount(volumeUUIDs: [Tower.backup])
+
+        XCTAssertFalse(ops.events.contains { $0.hasPrefix("mount") })
+        XCTAssertEqual(outcome.total, 1)
+        XCTAssertEqual(outcome.mountedCount, 0)
+    }
+
+    func testWakeMountLeavesAnIgnoredVolumeAlone() {
+        let discovery = FakeDiscovery([.success(Tower.snapshot())])
+        let ops = FakeOps()
+        let outcome = engine(discovery, ops, ignored: { $0 == Tower.backup })
+            .mount(volumeUUIDs: [Tower.backup])
+        XCTAssertFalse(ops.events.contains { $0.hasPrefix("mount") })
+        XCTAssertEqual(outcome.total, 0)
+    }
+
+    func testTowerMountStillMountsEverythingAndDropsTheWholeVeto() {
+        let discovery = FakeDiscovery([.success(Tower.snapshot()),
+                                       .success(Tower.snapshot(mounted: Tower.all))])
+        let ops = FakeOps()
+        ops.vetoedVolumeUUIDs = Tower.all
+        let outcome = engine(discovery, ops).mount()
+        XCTAssertEqual(ops.events.filter { $0.hasPrefix("mount") }.count, 3)
+        XCTAssertEqual(ops.vetoedVolumeUUIDs, [])
+        XCTAssertEqual(outcome.mountedCount, 3)
+    }
+
     func testFailedMountReadIsReportedNotCounted() {
         let discovery = FakeDiscovery([.success(Tower.snapshot()), .failure(StalledRead())])
         let outcome = engine(discovery, FakeOps()).mount()
