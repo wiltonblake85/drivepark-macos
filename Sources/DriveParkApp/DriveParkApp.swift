@@ -70,9 +70,38 @@ struct DriveParkApp: App {
             MenuContent()
                 .environmentObject(state)
         } label: {
-            Image(systemName: state.iconName)
+            if state.safeToPowerOff {
+                Image(nsImage: SafeMark.image)
+            } else {
+                Image(systemName: state.iconName)
+            }
         }
     }
+}
+
+/// The checkmark, sized to be read from across the desk.
+///
+/// It used to be a badge in the corner of the drive glyph, a few points
+/// across, and the one icon state you act on looked almost the same as the
+/// ones that mean keep your hands off. Now the whole slot is a filled check,
+/// as tall as the menu bar allows, and it appears only when safeToPowerOff is
+/// true. Every other state keeps the small drive glyph, so the difference is
+/// the size of the icon, not a detail inside it.
+///
+/// A template, so the menu bar draws it in the same colour as every other
+/// icon there. A green one was tried first and asked to be white.
+enum SafeMark {
+    static let image: NSImage = {
+        let symbol = NSImage(systemSymbolName: "checkmark.circle.fill",
+                             accessibilityDescription: "Safe to power off")
+            ?? NSImage()
+        // At 18 points it measured the same height as its neighbours on the
+        // tower Mac's menu bar. 23 fills the bar.
+        let config = NSImage.SymbolConfiguration(pointSize: 23, weight: .black)
+        let image = symbol.withSymbolConfiguration(config) ?? symbol
+        image.isTemplate = true
+        return image
+    }()
 }
 
 @MainActor
