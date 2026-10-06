@@ -5,9 +5,30 @@ import DriveParkKit
 
 setvbuf(stdout, nil, _IONBF, 0)
 
+/// The disks, for commands that only need names and UUIDs. A read that did
+/// not finish still knows what diskutil listed, and that is enough to find a
+/// volume by name; it is never enough to say anything is safe.
+func disksForLookup() -> [PhysicalDisk] {
+    do { return try discoverExternalDisks().disks } catch let failure as DiscoveryFailure {
+        print("Note: the disk read did not finish (\(failure.reason)). Using what it did list.")
+        return failure.partial
+    } catch {
+        print("Note: the disk read failed (\(error)).")
+        return []
+    }
+}
+
 func printStatus() {
-    let disks = discoverExternalDisks()
-    guard !disks.isEmpty else {
+    var snapshot: DiskSnapshot?
+    var failure: DiscoveryFailure?
+    do { snapshot = try discoverExternalDisks() } catch let thrown as DiscoveryFailure {
+        failure = thrown
+    } catch {
+        failure = DiscoveryFailure(reason: "\(error)")
+    }
+    let disks = snapshot?.disks ?? failure?.partial ?? []
+    let unaccounted = snapshot?.unaccountedMounts ?? []
+    guard !disks.isEmpty || !unaccounted.isEmpty || failure != nil else {
         print("No external physical disks found.")
         return
     }
@@ -49,11 +70,19 @@ func printStatus() {
         print("")
     }
 
-    if DiskutilTimeout.occurred {
-        print("WARNING: \(DiskutilTimeout.total) diskutil call(s) timed out.")
-        print("The enclosure is not answering detail queries. Volume state below")
-        print("is still accurate; disk details are not. Power-cycling the")
-        print("enclosure is usually what clears this.")
+    if !unaccounted.isEmpty {
+        print("Mounted, and not in the listing above:")
+        for mount in unaccounted { print("  \(mount.sentence)") }
+        print("")
+    }
+
+    if let failure {
+        print("WARNING: the disk read did not finish: \(failure.reason).")
+        if failure.timedOut {
+            print("The enclosure is not answering. The listing above is what")
+            print("diskutil managed to say, and it cannot be verified. Power-cycling")
+            print("the enclosure is usually what clears this.")
+        }
         print("")
     }
 
@@ -85,12 +114,18 @@ func printStatus() {
             print("")
         }
     }
-    if total == 0 {
-        print("Overall: no volumes discovered.")
-    } else if mounted == 0 {
-        print("Overall: all \(total) volume(s) unmounted. Safe to power off the enclosure.")
+    guard let snapshot else {
+        print("Overall: COULD NOT VERIFY. Do not power off the enclosure on this reading.")
+        exit(2)
+    }
+    let verdict = snapshot.verdict
+    if verdict.safeToPowerOff {
+        print(total == 0
+              ? "Overall: no volumes discovered, and nothing on an external disk is mounted."
+              : "Overall: all \(total) volume(s) unmounted. Safe to power off the enclosure.")
     } else {
         print("Overall: \(mounted) of \(total) volume(s) still mounted. NOT safe to power off.")
+        if let reason = verdict.reason(isIgnored: Preferences.isIgnored) { print("  \(reason).") }
     }
 }
 
@@ -126,30 +161,50 @@ func appLivenessLine() -> String {
 /// does or what it exits with.
 func postCardIfUnattended(_ outcome: ParkOutcome, scoped: Bool) {
     guard isatty(STDOUT_FILENO) == 0 else { return }
+    if outcome.parked && outcome.safeToPowerOff {
+        Transom.postAndWait(
+            title: "Safe to undock",
+            message: "Nothing on any external disk is mounted, verified on a fresh read. Pull the cable.",
+            symbol: "externaldrive.badge.checkmark",
+            duration: 10)
+        return
+    }
     if outcome.parked {
+        let reason = outcome.safetyReason ?? "something is still mounted"
         if scoped {
             Transom.postAndWait(
                 title: "Selected drive parked",
-                message: "Other drives in the enclosure may still be mounted. Not safe to undock.",
+                message: "Not safe to undock: \(reason).",
                 symbol: "externaldrive",
                 duration: 10)
         } else {
+            // Persistent: this one looks like success and is not.
             Transom.postAndWait(
-                title: "Safe to undock",
-                message: "All volumes verified unmounted. Pull the cable.",
-                symbol: "externaldrive.badge.checkmark",
-                duration: 10)
+                title: "Parked, but do NOT undock",
+                message: "\(reason).",
+                symbol: "exclamationmark.triangle.fill",
+                persistent: true,
+                urgent: true)
         }
         return
     }
-    let names = outcome.stillMounted.map { $0.displayName }.joined(separator: ", ")
-    var body = "Still mounted: \(names)."
-    if let blockers = outcome.blockerSummary { body += " Blocked by \(blockers)." }
     Transom.postAndWait(title: "Park failed, do not undock",
-                        message: body,
+                        message: outcome.problem ?? "The park did not verify.",
                         symbol: "externaldrive.trianglebadge.exclamationmark",
                         persistent: true,
                         urgent: true)
+}
+
+/// The value after `--only`. A bare `--only` used to fall through to "every
+/// disk", which with `--force` meant force-unmounting the whole tower.
+func onlyDisksArgument() -> Set<String>? {
+    guard let flagIndex = arguments.firstIndex(of: "--only") else { return nil }
+    let valueIndex = arguments.index(after: flagIndex)
+    guard arguments.indices.contains(valueIndex), !arguments[valueIndex].hasPrefix("-") else {
+        print("usage: --only needs a disk, e.g. --only disk4 (see `park status`)")
+        exit(64)
+    }
+    return [arguments[valueIndex]]
 }
 
 let arguments = CommandLine.arguments.dropFirst()
@@ -157,12 +212,8 @@ switch arguments.first ?? "status" {
 case "status":
     printStatus()
 case "now":
+    let onlyDisks = onlyDisksArgument()
     let engine = Engine()
-    var onlyDisks: Set<String>? = nil
-    if let flagIndex = arguments.firstIndex(of: "--only") {
-        let valueIndex = arguments.index(after: flagIndex)
-        if arguments.indices.contains(valueIndex) { onlyDisks = [arguments[valueIndex]] }
-    }
     let force = arguments.contains("--force")
     if force {
         print("FORCE: open files will be torn down and unwritten data in them is lost.")
@@ -176,19 +227,38 @@ case "now":
                      result.volume.displayName, verdict, result.duration, result.attempts))
     }
     if outcome.didWork { print("Timing: " + outcome.timing.summary) }
+    // Exit codes. 0: what was asked is verified, and for a tower park that
+    // means safe to power off. 1: partial, including a tower park that left
+    // an ignored volume mounted, because `park now && unplug` must not
+    // unplug that. 2: nothing could be verified.
+    if let failure = outcome.failure {
+        print("\nNOT PARKED. \(failure)")
+        if outcome.didWork { postCardIfUnattended(outcome, scoped: onlyDisks != nil) }
+        exit(2)
+    }
     if outcome.parked && !outcome.didWork {
-        // Everything was ignored or already unmounted. This run verified
-        // nothing, so it claims nothing.
+        // Everything was ignored or already unmounted. This run unmounted
+        // nothing, so it claims nothing beyond what the fresh read says.
         print("\nNo action taken. Nothing this run manages was mounted.")
-        exit(0)
+        if outcome.safeToPowerOff {
+            print("Nothing on any external disk is mounted. Safe to power off the enclosure.")
+            exit(0)
+        }
+        print("NOT safe to power off: \(outcome.safetyReason ?? "something is still mounted").")
+        exit(onlyDisks == nil ? 1 : 0)
     }
     postCardIfUnattended(outcome, scoped: onlyDisks != nil)
     if outcome.parked {
-        if onlyDisks == nil {
-            print("\nPARKED. All volumes verified unmounted. Safe to power off the enclosure.")
+        if outcome.safeToPowerOff {
+            print(onlyDisks == nil
+                  ? "\nPARKED. Every volume on every external disk verified unmounted. Safe to power off the enclosure."
+                  : "\nPARKED. Selected drive verified unmounted, and nothing else is mounted. Safe to power off the enclosure.")
+        } else if onlyDisks == nil {
+            print("\nPARKED everything DrivePark manages, but NOT safe to power off: \(outcome.safetyReason ?? "something is still mounted").")
         } else {
-            print("\nPARKED. Selected drive verified unmounted. Other drives in the enclosure may still be mounted.")
+            print("\nPARKED. Selected drive verified unmounted. NOT safe to power off: \(outcome.safetyReason ?? "something is still mounted").")
         }
+        let exitCode: Int32 = (onlyDisks == nil && !outcome.safeToPowerOff) ? 1 : 0
         if arguments.contains("--hold") {
             print("Holding park: remount attempts will be refused. Ctrl-C to stop holding.")
             signal(SIGINT, SIG_IGN)
@@ -206,19 +276,13 @@ case "now":
             sigint.resume()
             dispatchMain()
         }
-
+        exit(exitCode)
     } else {
-        let names = outcome.stillMounted.map { "\"\($0.name)\"" }.joined(separator: ", ")
-        print("\nNOT PARKED. Still mounted: \(names)")
-        if let blockers = outcome.blockerSummary { print("Blockers: \(blockers)") }
+        print("\nNOT PARKED. \(outcome.problem ?? "The park did not verify.")")
         exit(1)
     }
 case "mount":
-    var mountOnly: Set<String>? = nil
-    if let flagIndex = arguments.firstIndex(of: "--only") {
-        let valueIndex = arguments.index(after: flagIndex)
-        if arguments.indices.contains(valueIndex) { mountOnly = [arguments[valueIndex]] }
-    }
+    let mountOnly = onlyDisksArgument()
 
     // A veto belongs to the process that registered the Disk Arbitration
     // callback, and no other process can lift it. Mounting locally while the
@@ -245,9 +309,19 @@ case "mount":
                 exit(1)
             }
             print("DrivePark has it. Waiting for the remount to finish and verify.")
-            if let answer = VetoBroker.awaitAnswer(nonce: nonce, timeout: 180) {
-                print("\(answer.mounted) of \(answer.total) external volume(s) mounted.")
-                exit(answer.mounted < answer.total ? 1 : 0)
+            switch VetoBroker.awaitAnswer(nonce: nonce, timeout: 180) {
+            case .mounted(let mounted, let total):
+                print("\(mounted) of \(total) external volume(s) mounted.")
+                exit(mounted < total ? 1 : 0)
+            case .busy:
+                print("DrivePark is in the middle of a park or a mount and did nothing.")
+                print("Run this again when it finishes. The veto is still up.")
+                exit(1)
+            case .failed(let reason):
+                print("DrivePark could not finish: \(reason)")
+                exit(2)
+            case nil:
+                break
             }
             // It picked the request up and never finished. Do not guess which
             // way that went: `park status` reads the disks rather than this
@@ -270,6 +344,10 @@ case "mount":
                      result.success ? "mounted" : "FAILED", result.duration))
     }
     if !outcome.results.isEmpty { print("Timing: " + outcome.summary) }
+    if let failure = outcome.failure {
+        print(failure)
+        exit(2)
+    }
     print("\(outcome.mountedCount) of \(outcome.total) external volume(s) mounted.")
     if outcome.mountedCount < outcome.total { exit(1) }
 case "ignore", "manage":
@@ -281,7 +359,7 @@ case "ignore", "manage":
         print("usage: park \(wantIgnored ? "ignore" : "manage") <volume name or UUID>")
         exit(64)
     }
-    let volumes = discoverExternalDisks().flatMap { $0.allVolumes }
+    let volumes = disksForLookup().flatMap { $0.allVolumes }
     let match = volumes.first {
         $0.displayName.caseInsensitiveCompare(target) == .orderedSame
             || $0.uuid?.caseInsensitiveCompare(target) == .orderedSame
@@ -404,7 +482,7 @@ case "transom":
         exit(1)
     }
 case "ignored":
-    let volumes = discoverExternalDisks().flatMap { $0.allVolumes }
+    let volumes = disksForLookup().flatMap { $0.allVolumes }
     let ignored = volumes.filter { Preferences.isIgnored($0.uuid) }
     if ignored.isEmpty {
         print("Nothing is ignored. DrivePark manages every external volume.")

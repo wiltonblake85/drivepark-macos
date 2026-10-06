@@ -6,7 +6,7 @@
 // 2026-09-07; the history below keeps the old name where it quotes the past.
 //
 // The veto is a Disk Arbitration mount-approval callback registered on a
-// DASession and gated by `parkedVolumeUUIDs`. Both live in one process's
+// DASession and gated by `vetoedVolumeUUIDs`. Both live in one process's
 // memory, and that is not an implementation detail that can be factored away:
 // DA dissent comes from the process that registered the callback, so no other
 // process can lift it. `park mount` in a second process clears its own empty
@@ -62,7 +62,19 @@ public enum VetoBroker {
         store.set(Array(uuids), forKey: holderUUIDsKey)
     }
 
+    /// Clears the record only when this process wrote it.
+    ///
+    /// A park now arms its veto before unmounting and drops it again if the
+    /// park fails (audit H5). In the CLI that drop would otherwise erase the
+    /// app's record while the app still holds a real veto, and `park mount`
+    /// would stop asking the app and run into its dissent instead.
     public static func clearHold() {
+        let recorded = pid_t(store.integer(forKey: holderPIDKey))
+        guard recorded == 0 || recorded == ProcessInfo.processInfo.processIdentifier else { return }
+        sweepHold()
+    }
+
+    private static func sweepHold() {
         store.removeObject(forKey: holderPIDKey)
         store.removeObject(forKey: holderNameKey)
         store.removeObject(forKey: holderUUIDsKey)
@@ -78,7 +90,7 @@ public enum VetoBroker {
         let pid = pid_t(store.integer(forKey: holderPIDKey))
         guard pid > 0 else { return nil }
         guard kill(pid, 0) == 0 || errno == EPERM else {
-            clearHold()
+            sweepHold()
             return nil
         }
         let name = store.string(forKey: holderNameKey) ?? "unknown"
@@ -151,25 +163,53 @@ public enum VetoBroker {
         return false
     }
 
+    public enum Answer: Equatable {
+        case mounted(Int, of: Int)
+        /// The holder was in the middle of a park or a mount and did nothing.
+        case busy
+        /// The holder tried and could not verify what happened.
+        case failed(String)
+    }
+
     public static func answer(nonce: String, mounted: Int, total: Int) {
         store.set(["nonce": nonce, "mounted": mounted, "total": total],
                   forKey: answerKey)
         store.synchronize()
     }
 
+    /// A request that lands during a park is declined out loud. It used to be
+    /// run on top of the park and then clear the app's busy flag under it.
+    public static func answerBusy(nonce: String) {
+        store.set(["nonce": nonce, "busy": true], forKey: answerKey)
+        store.synchronize()
+    }
+
+    public static func answerFailed(nonce: String, reason: String) {
+        store.set(["nonce": nonce, "failure": reason], forKey: answerKey)
+        store.synchronize()
+    }
+
     /// Polls rather than blocking on the notification, because the requester is
     /// a short-lived CLI with no run loop and because a doorbell that does not
     /// ring must produce a timeout, not a hang.
-    public static func awaitAnswer(nonce: String, timeout: TimeInterval) -> (mounted: Int, total: Int)? {
+    public static func awaitAnswer(nonce: String, timeout: TimeInterval) -> Answer? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             store.synchronize()
             if let raw = store.dictionary(forKey: answerKey),
-               raw["nonce"] as? String == nonce,
-               let mounted = raw["mounted"] as? Int,
-               let total = raw["total"] as? Int {
-                store.removeObject(forKey: answerKey)
-                return (mounted, total)
+               raw["nonce"] as? String == nonce {
+                var answer: Answer?
+                if raw["busy"] as? Bool == true {
+                    answer = .busy
+                } else if let failure = raw["failure"] as? String {
+                    answer = .failed(failure)
+                } else if let mounted = raw["mounted"] as? Int, let total = raw["total"] as? Int {
+                    answer = .mounted(mounted, of: total)
+                }
+                if let answer {
+                    store.removeObject(forKey: answerKey)
+                    return answer
+                }
             }
             Thread.sleep(forTimeInterval: 0.25)
         }

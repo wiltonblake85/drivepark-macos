@@ -83,9 +83,15 @@ final class AppState: ObservableObject {
     static weak var shared: AppState?
 
     @Published var disks: [PhysicalDisk] = []
+    /// Mounts the kernel reports that the last read could not account for.
+    @Published var unaccountedMounts: [UnaccountedMount] = []
+    /// Set when the last read did not finish. Nothing on screen is verified
+    /// while this is set, and the icon never shows the checkmark.
+    @Published var readFailure: String?
     @Published var busy = false
     @Published var message = ""
     @Published var lastVerifiedAt: Date?
+    @Published var lastFailedReadAt: Date?
     @Published var enclosureStalled = false
     /// Guards the 30-second timer. Before diskutil calls had a timeout, a
     /// stalled enclosure made this timer stack a new hung child process every
@@ -114,6 +120,12 @@ final class AppState: ObservableObject {
     /// Force is offered from here and nowhere else, so it can never be reached
     /// without a failure having already happened and been explained.
     @Published var lastBlocked: [VolumeParkResult] = []
+    /// When that list was made. It used to never expire (audit H4).
+    private var lastBlockedAt: Date?
+    /// Long enough to go and quit the program the failure named and come
+    /// back; short enough that nobody forces on a failure they no longer
+    /// remember the details of.
+    static let forceOfferLifetime: TimeInterval = 300
     @Published var workingSince: Date?
     @Published var workingOn: String = ""
     private var tickTimer: Timer?
@@ -137,28 +149,53 @@ final class AppState: ObservableObject {
 
     var allVolumes: [Volume] { disks.flatMap { $0.allVolumes } }
     /// Only the volumes DrivePark is allowed to act on. An ignored volume must
-    /// not keep the tower reading "not parked" forever, and must not be
-    /// counted as something still to do.
+    /// not be counted as something still to do.
     var volumes: [Volume] { allVolumes.filter { !Preferences.isIgnored($0.uuid) } }
-    var ignoredVolumes: [Volume] { allVolumes.filter { Preferences.isIgnored($0.uuid) } }
     var mountedCount: Int { volumes.filter { $0.isMounted }.count }
-    var isParked: Bool { !volumes.isEmpty && mountedCount == 0 }
+    /// Nothing DrivePark manages is mounted, so a park would do nothing.
+    ///
+    /// Decides what the menu offers and which way the shortcut goes. It is not
+    /// a safety claim: an ignored volume can still be mounted. That used to be
+    /// called isParked and drove the checkmark (audit H1).
+    var nothingToPark: Bool { mountedCount == 0 }
+
+    private var verdict: PowerOffVerdict {
+        PowerOffVerdict(disks: disks, unaccountedMounts: unaccountedMounts)
+    }
+
+    /// The one answer: the last read finished, it found something, and nothing
+    /// on any external disk is mounted, managed or ignored, with no mount the
+    /// kernel reports that the read could not account for. The icon, the
+    /// status line and the menu all read this.
+    var safeToPowerOff: Bool {
+        readFailure == nil
+            && !(allVolumes.isEmpty && unaccountedMounts.isEmpty)
+            && verdict.safeToPowerOff
+    }
+
+    var safetyReason: String? {
+        if let readFailure { return "could not verify: \(readFailure)" }
+        return verdict.reason(isIgnored: Preferences.isIgnored)
+    }
 
     var iconName: String {
-        if enclosureStalled { return "externaldrive.badge.exclamationmark" }
-        if volumes.isEmpty { return "externaldrive.badge.questionmark" }
-        if isParked { return "externaldrive.badge.checkmark" }
+        if readFailure != nil { return "externaldrive.badge.exclamationmark" }
+        if allVolumes.isEmpty && unaccountedMounts.isEmpty { return "externaldrive.badge.questionmark" }
+        if safeToPowerOff { return "externaldrive.badge.checkmark" }
         return "externaldrive"
     }
 
     var statusLine: String {
-        if allVolumes.isEmpty { return "No external disks found" }
-        if volumes.isEmpty { return "Every external volume is on the ignore list" }
+        if readFailure != nil {
+            return enclosureStalled ? "Enclosure not answering, cannot verify"
+                                    : "Could not read the disks, cannot verify"
+        }
+        if allVolumes.isEmpty && unaccountedMounts.isEmpty { return "No external disks found" }
         if !triggerWarnings.isEmpty {
             return "\(triggerWarnings.count) armed trigger(s) cannot fire"
         }
-        if enclosureStalled { return "Enclosure not fully answering" }
-        if isParked { return "Parked, safe to power off" }
+        if safeToPowerOff { return "Parked, safe to power off" }
+        if nothingToPark, let reason = safetyReason { return "Not safe to power off: \(reason)" }
         return "\(mountedCount) of \(volumes.count) volumes mounted"
     }
 
@@ -172,28 +209,55 @@ final class AppState: ObservableObject {
     /// The receipt. Every claim in this app traces to a fresh state read, and
     /// this is when the last one happened.
     var verifiedLine: String? {
-        guard let lastVerifiedAt else { return nil }
         let formatter = DateFormatter()
         formatter.dateFormat = "h:mm a"
+        if readFailure != nil, let lastFailedReadAt {
+            return "Last read failed at \(formatter.string(from: lastFailedReadAt))"
+        }
+        guard let lastVerifiedAt else { return nil }
         return "Verified \(formatter.string(from: lastVerifiedAt))"
     }
 
+    /// Puts a read on screen. A read that did not finish clears nothing it
+    /// cannot replace: the drive list stays as it was, marked unverified, and
+    /// the checkmark goes.
+    private func apply(_ read: Result<DiskSnapshot, Error>) {
+        switch read {
+        case .success(let snapshot):
+            disks = snapshot.disks
+            unaccountedMounts = snapshot.unaccountedMounts
+            readFailure = nil
+            enclosureStalled = false
+            lastVerifiedAt = Date()
+        case .failure(let error):
+            let failure = error as? DiscoveryFailure
+            if let partial = failure?.partial, !partial.isEmpty { disks = partial }
+            unaccountedMounts = []
+            readFailure = failure?.reason ?? "\(error)"
+            enclosureStalled = failure?.timedOut ?? false
+            lastFailedReadAt = Date()
+        }
+        pruneForceOffer()
+    }
+
     func refresh() {
-        guard !refreshing else { return }
+        // Not during a park or a mount: a read that starts before one finishes
+        // and lands after it would put an older state over the verified one.
+        guard !refreshing, !busy else { return }
         refreshing = true
         let engine = self.engine
         Task.detached {
-            let found = engine.discover()
-            let stalled = DiskutilTimeout.occurred
+            let read = Result { try engine.discover() }
+            // A volume put on the ignore list from the CLI is no longer this
+            // app's to hold down either.
+            engine.liftVetoForIgnored()
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.disks = found
-                self.lastVerifiedAt = Date()
+                self.apply(read)
                 // Heartbeat. Every trigger in this app depends on the app
                 // being alive, and until now nothing anywhere said whether it
                 // was. Absence is the one failure it could not report.
                 Preferences.recordHeartbeat()
-                self.enclosureStalled = stalled
                 self.refreshing = false
                 var warnings: [ParkTrigger: String] = [:]
                 for status in TriggerHealth.armedButDead() {
@@ -201,8 +265,8 @@ final class AppState: ObservableObject {
                 }
                 self.triggerWarnings = warnings
                 self.transomFailure = Transom.lastFailure
-                if stalled, self.message.isEmpty || self.message.hasPrefix("Enclosure") {
-                    self.message = "Enclosure not answering detail queries. Volume state is still accurate."
+                if self.enclosureStalled, self.message.isEmpty || self.message.hasPrefix("Enclosure") {
+                    self.message = "Enclosure not answering. Nothing can be verified until it does."
                 }
             }
         }
@@ -212,29 +276,105 @@ final class AppState: ObservableObject {
 
     func triggersNoteManualPark() { triggers.noteManualPark() }
 
-    /// Offered only after a manual park failed. Confirmed by a modal that
-    /// names what is lost, then run once with no retries.
-    func forceUnmountBlocked() {
-        guard !busy, !lastBlocked.isEmpty else { return }
-        let names = lastBlocked.map { $0.volume.displayName }
-        let blockers = Array(Set(lastBlocked.flatMap { $0.blockers })).sorted()
-        guard ForcePrompt.confirm(volumes: names, blockers: blockers) else {
-            message = "Left alone. Nothing was forced."
+    private var forceOfferIsLive: Bool {
+        guard !lastBlocked.isEmpty, let lastBlockedAt else { return false }
+        return Date().timeIntervalSince(lastBlockedAt) < Self.forceOfferLifetime
+    }
+
+    /// Expires the offer, and drops any volume a fresh read shows is no longer
+    /// mounted: there is nothing left to force on it.
+    private func pruneForceOffer() {
+        guard !lastBlocked.isEmpty else { return }
+        guard forceOfferIsLive else {
+            lastBlocked = []
+            lastBlockedAt = nil
             return
         }
-        let disks = Set(lastBlocked.compactMap { volume -> String? in
-            self.disks.first { $0.allVolumes.contains { $0.device == volume.volume.device } }?.device
-        })
-        triggers.noteManualPark()
+        guard readFailure == nil else { return }
+        let mounted = Set(allVolumes.filter(\.isMounted).compactMap(\.uuid))
+        lastBlocked.removeAll { result in
+            result.volume.uuid.map { !mounted.contains($0) } ?? false
+        }
+        if lastBlocked.isEmpty { lastBlockedAt = nil }
+    }
+
+    /// Offered only after a manual park failed. The holders are read again
+    /// before the prompt, the prompt names what is lost, and only the volumes
+    /// it names are forced, found by UUID on a fresh read at that moment
+    /// (audit H4).
+    func forceUnmountBlocked() {
+        guard !busy else { return }
+        guard forceOfferIsLive else {
+            lastBlocked = []
+            lastBlockedAt = nil
+            message = "That force offer expired. Park again to see who is holding the drive now."
+            return
+        }
+        let offered = lastBlocked
+        // One offer, one answer, whatever the answer turns out to be.
         lastBlocked = []
-        runPark(only: disks.isEmpty ? nil : disks, deadline: nil,
-                label: nil, force: true, completion: nil)
+        lastBlockedAt = nil
+        let untracked = offered.filter { $0.volume.uuid == nil }.map(\.volume.displayName)
+        guard untracked.isEmpty else {
+            message = "\(untracked.joined(separator: ", ")) has no volume UUID, so DrivePark "
+                + "cannot be sure it is still the same volume. Nothing was forced."
+            return
+        }
+        let uuids = Set(offered.compactMap(\.volume.uuid))
+        // macOS's own words from the failed park. When lsof sees no holder,
+        // as with a Time Machine backup in progress, this is the only clue.
+        let refusals = Array(Set(offered.compactMap(\.refusal))).sorted()
+        busy = true
+        message = "Checking who is holding them now…"
+        let engine = self.engine
+        Task.detached {
+            let check = engine.checkForce(volumeUUIDs: uuids)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.busy = false
+                switch check {
+                case .refused(let reason):
+                    self.message = reason
+                case .ready(let volumes, let blockers):
+                    guard ForcePrompt.confirm(volumes: volumes.map(\.displayName),
+                                              blockers: blockers, refusals: refusals) else {
+                        self.message = "Left alone. Nothing was forced."
+                        return
+                    }
+                    self.triggers.noteManualPark()
+                    self.runForce(uuids: Set(volumes.compactMap(\.uuid)),
+                                  label: volumes.map(\.displayName).joined(separator: ", "))
+                }
+            }
+        }
     }
 
     var forceOfferLine: String? {
-        guard !lastBlocked.isEmpty else { return nil }
+        guard forceOfferIsLive else { return nil }
         let names = lastBlocked.map { $0.volume.displayName }.joined(separator: ", ")
         return "Force unmount \(names)…"
+    }
+
+    private func runForce(uuids: Set<String>, label: String) {
+        guard !busy else {
+            message = "Something else started first. Nothing was forced."
+            return
+        }
+        busy = true
+        message = "Forcing…"
+        startTicking()
+        let engine = self.engine
+        Task.detached {
+            let outcome = engine.forceUnmount(volumeUUIDs: uuids) { line in
+                Task { @MainActor in self.workingOn = line }
+            }
+            Self.record(outcome, trigger: "force")
+            let read = Self.read(after: outcome, engine: engine)
+            await MainActor.run { [weak self] in
+                self?.finish(outcome, read: read, label: label, trigger: nil,
+                             scoped: true, offersForce: false)
+            }
+        }
     }
 
     func park(only: Set<String>? = nil, label: String? = nil) {
@@ -253,6 +393,8 @@ final class AppState: ObservableObject {
             return false
         }
         busy = true
+        lastBlocked = []
+        lastBlockedAt = nil
         message = "Mounting…"
         let engine = self.engine
         Task.detached {
@@ -260,14 +402,17 @@ final class AppState: ObservableObject {
             Self.record(outcome, trigger: label ?? "manual")
             let (mounted, total) = (outcome.mountedCount, outcome.total)
             let split = String(format: " %.1fs.", outcome.timing.total)
-            let found = engine.discover()
+            let read = Result { try engine.discover() }
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.disks = found
-                self.lastVerifiedAt = Date()
+                self.apply(read)
                 self.busy = false
-                if let label {
-                    self.message = "\(label) back online." + split
+                if let failure = outcome.failure {
+                    self.message = failure
+                } else if let label {
+                    self.message = mounted == total
+                        ? "\(label) back online." + split
+                        : "\(label): \(mounted) of \(total) volumes mounted." + split
                 } else {
                     self.message = mounted == total
                         ? "All volumes back online." + split
@@ -348,29 +493,45 @@ final class AppState: ObservableObject {
         // Answer the doorbell before doing the work, so the CLI waits
         // instead of concluding that nobody is home.
         VetoBroker.acknowledge(nonce: request.nonce)
+        // A request that lands during a park is declined out loud. It used to
+        // run on top of the park and then clear the busy flag under it.
+        guard !busy else {
+            VetoBroker.answerBusy(nonce: request.nonce)
+            Preferences.recordDiagnostic(
+                "mount", "command line request declined: a park or mount was already running")
+            return
+        }
         busy = true
+        lastBlocked = []
+        lastBlockedAt = nil
         message = "Mounting, asked by the command line…"
         let engine = self.engine
         Task.detached {
             let outcome = engine.mount(onlyDisks: request.disks)
             Self.record(outcome, trigger: "command line")
             let (mounted, total) = (outcome.mountedCount, outcome.total)
-            let found = engine.discover()
-            VetoBroker.answer(nonce: request.nonce, mounted: mounted, total: total)
+            if let failure = outcome.failure {
+                VetoBroker.answerFailed(nonce: request.nonce, reason: failure)
+            } else {
+                VetoBroker.answer(nonce: request.nonce, mounted: mounted, total: total)
+            }
+            let read = Result { try engine.discover() }
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.disks = found
-                self.lastVerifiedAt = Date()
+                self.apply(read)
                 self.busy = false
-                self.message = mounted == total
-                    ? "All volumes back online, asked by the command line."
-                    : "\(mounted) of \(total) volumes mounted."
+                if let failure = outcome.failure {
+                    self.message = failure
+                } else {
+                    self.message = mounted == total
+                        ? "All volumes back online, asked by the command line."
+                        : "\(mounted) of \(total) volumes mounted."
+                }
             }
         }
     }
 
     private func runPark(only: Set<String>?, deadline: Date?, label: String?,
-                         force: Bool = false,
                          triggerLabel: String? = nil,
                          completion: ((ParkOutcome?) -> Void)?) {
         guard !busy else {
@@ -380,35 +541,52 @@ final class AppState: ObservableObject {
             return
         }
         busy = true
-        message = force
-            ? "Forcing…"
-            : (triggerLabel.map { "Parking because \($0)…" } ?? "Parking…")
+        lastBlocked = []
+        lastBlockedAt = nil
+        message = triggerLabel.map { "Parking because \($0)…" } ?? "Parking…"
         startTicking()
         let engine = self.engine
-        let before = volumes
         Task.detached {
-            let outcome = engine.park(onlyDisks: only, deadline: deadline, force: force) { line in
+            let outcome = engine.park(onlyDisks: only, deadline: deadline) { line in
                 Task { @MainActor in self.workingOn = line }
             }
             Self.record(outcome, trigger: triggerLabel ?? label ?? "manual")
-            let found = engine.discover()
+            let read = Self.read(after: outcome, engine: engine)
             await MainActor.run { [weak self] in
-                guard let self else { return }
-                self.disks = found
-                self.lastVerifiedAt = Date()
-                self.busy = false
-                self.stopTicking()
-                self.message = Self.describe(outcome, label: label, trigger: triggerLabel)
                 // Trigger-driven parks never leave a force offer behind. A
                 // failure you did not watch happen is not a mandate to do
                 // something destructive later.
-                self.lastBlocked = (triggerLabel == nil && !outcome.parked)
-                    ? outcome.results.filter { !$0.success }
-                    : []
-                self.notify(outcome, scoped: only != nil, before: before)
+                self?.finish(outcome, read: read, label: label, trigger: triggerLabel,
+                             scoped: only != nil, offersForce: triggerLabel == nil)
             }
             completion?(outcome)
         }
+    }
+
+    /// The read the screen should show after a park: the park's own last
+    /// verifying read when it has one. A park that touched the disks and then
+    /// could not verify gets no other read in its place, so it can never end
+    /// on a checkmark (audit C1); the next refresh reads again.
+    nonisolated private static func read(after outcome: ParkOutcome,
+                                         engine: Engine) -> Result<DiskSnapshot, Error> {
+        if outcome.didWork, let failure = outcome.failure {
+            return .failure(DiscoveryFailure(reason: failure))
+        }
+        if let snapshot = outcome.snapshot { return .success(snapshot) }
+        return Result { try engine.discover() }
+    }
+
+    private func finish(_ outcome: ParkOutcome, read: Result<DiskSnapshot, Error>,
+                        label: String?, trigger: String?, scoped: Bool, offersForce: Bool) {
+        apply(read)
+        busy = false
+        stopTicking()
+        message = Self.describe(outcome, label: label, trigger: trigger)
+        if offersForce && !outcome.parked {
+            lastBlocked = outcome.results.filter { !$0.success }
+            lastBlockedAt = lastBlocked.isEmpty ? nil : Date()
+        }
+        notify(outcome, scoped: scoped)
     }
 
     private func startTicking() {
@@ -441,13 +619,11 @@ final class AppState: ObservableObject {
     /// the one you can actually read. Anything that means "do not pull the
     /// cable" is posted persistent, so it cannot time out while your hand is
     /// behind the desk.
-    private func notify(_ outcome: ParkOutcome, scoped: Bool, before: [Volume]) {
+    private func notify(_ outcome: ParkOutcome, scoped: Bool) {
         guard outcome.didWork || !outcome.parked else { return }
 
         if !outcome.parked {
-            let names = outcome.stillMounted.map { $0.displayName }.joined(separator: ", ")
-            var body = "Still mounted: \(names)."
-            if let blockers = outcome.blockerSummary { body += " Blocked by \(blockers)." }
+            let body = outcome.problem ?? "The park did not verify."
             Notifier.shared.post(title: "Park failed", body: body)
             Transom.post(title: "Park failed, do not undock",
                          message: body,
@@ -462,65 +638,64 @@ final class AppState: ObservableObject {
             .map { $0.volume.displayName }
         let seconds = String(format: "%.1fs", outcome.timing.total)
 
-        if isParked {
-            // Everything DrivePark manages is unmounted. Only now is the
-            // undock question even askable.
-            let stillMountedIgnored = ignoredVolumes.filter { $0.isMounted }
-            if stillMountedIgnored.isEmpty {
-                Notifier.shared.post(
-                    title: "Tower parked, safe to unplug",
-                    body: "\(parkedNames.count) volume(s) verified unmounted in \(seconds).")
-                // Urgent, and it took a real complaint to get here. Wekesa
-                // runs Transom filtered to VIPs, codes and urgent, so this card
-                // was being held, which is the worst one to hold: it is the
-                // only card you ACT on. The failure cards tell you to keep your
-                // hands off, and doing nothing is the safe default you would
-                // have taken anyway. This is the one that says the waiting is
-                // over, and a "safe to undock" that arrives after you have
-                // already walked away is the same as no card at all.
-                //
-                // Still ten seconds rather than persistent. It is not a warning
-                // and it should not need dismissing.
-                Transom.post(
-                    title: "Safe to undock",
-                    message: "\(parkedNames.count) volume(s) verified unmounted in \(seconds). "
-                        + "Pull the cable.",
-                    symbol: "externaldrive.badge.checkmark",
-                    duration: 10,
-                    urgent: true)
-                // The one sound that means "pull the cable". Nothing else uses it.
-                Chime.safeToUnplug.play()
-            } else {
-                let names = stillMountedIgnored.map { $0.displayName }.joined(separator: ", ")
-                Notifier.shared.post(
-                    title: "Tower parked, but not safe to unplug",
-                    body: "\(names) is on the ignore list and still mounted. Verified in \(seconds).")
-                // Persistent on purpose. This one looks like success in the
-                // menu bar icon and is not, and a card that fades in six
-                // seconds is how a mounted drive gets yanked.
-                Transom.post(
-                    title: "Parked, but do NOT undock",
-                    message: "\(names) is on the ignore list and still mounted. "
-                        + "Verified in \(seconds).",
-                    symbol: "exclamationmark.triangle.fill",
-                    persistent: true,
-                    urgent: true)
-                Chime.partial.play()
-            }
-        } else {
+        // The same answer the icon gives, from the same read. This used to
+        // ask its own question about ignored volumes while the icon asked a
+        // narrower one, and they could disagree (audit H1).
+        if outcome.safeToPowerOff {
+            Notifier.shared.post(
+                title: scoped ? "\(parkedNames.joined(separator: ", ")) parked, safe to unplug"
+                              : "Tower parked, safe to unplug",
+                body: "Nothing on any external disk is mounted. Verified in \(seconds).")
+            // Urgent, and it took a real complaint to get here. Wekesa runs
+            // Transom filtered to VIPs, codes and urgent, so this card was
+            // being held, which is the worst one to hold: it is the only card
+            // you ACT on. The failure cards tell you to keep your hands off,
+            // and doing nothing is the safe default you would have taken
+            // anyway. This is the one that says the waiting is over, and a
+            // "safe to undock" that arrives after you have already walked away
+            // is the same as no card at all.
+            //
+            // Still ten seconds rather than persistent. It is not a warning and
+            // it should not need dismissing.
+            Transom.post(
+                title: "Safe to undock",
+                message: "\(parkedNames.count) volume(s) verified unmounted in \(seconds), "
+                    + "and nothing else is mounted. Pull the cable.",
+                symbol: "externaldrive.badge.checkmark",
+                duration: 10,
+                urgent: true)
+            // The one sound that means "pull the cable". Nothing else uses it.
+            Chime.safeToUnplug.play()
+            return
+        }
+
+        let reason = outcome.safetyReason ?? "something is still mounted"
+        if scoped {
             let names = parkedNames.joined(separator: ", ")
             Notifier.shared.post(
                 title: names.isEmpty ? "Parked" : "\(names) parked",
-                body: "\(mountedCount) of \(volumes.count) volumes still mounted. Not safe to unplug yet.")
+                body: "Not safe to unplug yet: \(reason).")
             Transom.post(
                 title: names.isEmpty ? "Parked" : "\(names) parked",
-                message: "\(mountedCount) of \(volumes.count) volumes still mounted. "
-                    + "Not safe to undock yet.",
+                message: "Not safe to undock yet: \(reason).",
                 symbol: "externaldrive",
                 duration: 10,
                 urgent: true)
-            Chime.partial.play()
+        } else {
+            Notifier.shared.post(
+                title: "Tower parked, but not safe to unplug",
+                body: "\(reason). Verified in \(seconds).")
+            // Persistent on purpose. A tower park that leaves something
+            // mounted looks like success and is not, and a card that fades in
+            // six seconds is how a mounted drive gets yanked.
+            Transom.post(
+                title: "Parked, but do NOT undock",
+                message: "\(reason). Verified in \(seconds).",
+                symbol: "exclamationmark.triangle.fill",
+                persistent: true,
+                urgent: true)
         }
+        Chime.partial.play()
     }
 
     /// Writes the timing split and every volume's verdict to the unified log.
@@ -560,8 +735,12 @@ final class AppState: ObservableObject {
 
     private static func describe(_ outcome: ParkOutcome, label: String?,
                                  trigger: String?) -> String {
+        if let failure = outcome.failure {
+            return outcome.didWork ? "Not parked. \(failure)" : failure
+        }
+        let notSafe = outcome.safetyReason.map { " Not safe to power off: \($0)." } ?? ""
         if outcome.parked && !outcome.didWork {
-            return "No action taken. Nothing this run manages was mounted."
+            return "No action taken. Nothing this run manages was mounted." + notSafe
         }
         if outcome.parked {
             // The split rides along on the menu line so the answer to "why did
@@ -569,14 +748,16 @@ final class AppState: ObservableObject {
             let split = String(format: " %.1fs: unmount %.1f, spin-down %.1f.",
                                outcome.timing.total, outcome.timing.unmount,
                                outcome.timing.spinDown)
-            if let label { return "\(label) parked." + split }
-            if let trigger { return "Parked because \(trigger). Safe to power off." + split }
-            return "Parked. Safe to power off the tower." + split
+            if outcome.safeToPowerOff {
+                if let label { return "\(label) parked. Safe to power off." + split }
+                if let trigger { return "Parked because \(trigger). Safe to power off." + split }
+                return "Parked. Safe to power off the tower." + split
+            }
+            if let label { return "\(label) parked." + notSafe + split }
+            if let trigger { return "Parked because \(trigger)." + notSafe + split }
+            return "Parked what DrivePark manages." + notSafe + split
         }
-        let names = outcome.stillMounted.map { $0.displayName }.joined(separator: ", ")
-        var text = "Not parked. Still mounted: \(names)."
-        if let blockers = outcome.blockerSummary { text += " Blocked by \(blockers)." }
-        return text
+        return "Not parked. " + (outcome.problem ?? "The park did not verify.")
     }
 
     // MARK: - Settings
@@ -607,8 +788,12 @@ final class AppState: ObservableObject {
         }
         Preferences.setIgnored(uuid, on)
         ignoredUUIDs = Preferences.ignoredVolumeUUIDs
+        // Ignored means hands off, and refusing its remount is a hand on it.
+        // A parked volume put on the list used to stay vetoed until the app
+        // quit, with no Mount offered for it in the menu.
+        if on { engine.liftVetoForIgnored() }
         message = on
-            ? "\(volume.displayName) is ignored. DrivePark will not unmount it."
+            ? "\(volume.displayName) is ignored. DrivePark will not unmount it, or stop it mounting."
             : "\(volume.displayName) is managed again."
         objectWillChange.send()
     }
@@ -619,7 +804,7 @@ final class AppState: ObservableObject {
     func hotKeyPressed() {
         guard !busy, !volumes.isEmpty else { return }
         triggers.noteManualPark()
-        if isParked {
+        if nothingToPark {
             mount()
         } else {
             park()
@@ -810,7 +995,7 @@ struct MenuContent: View {
             state.park()
         }
 
-        .disabled(state.busy || state.isParked || state.volumes.isEmpty)
+        .disabled(state.busy || state.nothingToPark || state.volumes.isEmpty)
         Button("Mount Tower") {
             state.mount()
         }
