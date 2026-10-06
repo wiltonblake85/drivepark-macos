@@ -17,7 +17,13 @@ public struct Volume: Equatable {
     /// whole-disk serial to key on.
     public let uuid: String?
     public var isMounted: Bool { mountPoint != nil }
-    public var displayName: String { name.trimmingCharacters(in: .whitespaces) }
+    /// The name for showing to a person: trimmed, and with anything that
+    /// could forge or hide a line escaped (see printable). `name` stays raw
+    /// for the few places that must match it exactly.
+    public var displayName: String { printable(name.trimmingCharacters(in: .whitespaces)) }
+    /// The mount point for showing to a person. A mount point is usually the
+    /// volume name under /Volumes, so it carries whatever the name carries.
+    public var displayMountPoint: String? { mountPoint.map(printable) }
 }
 
 public struct Container: Equatable {

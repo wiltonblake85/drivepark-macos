@@ -263,7 +263,7 @@ public final class Engine {
             guard let mountPoint = volume.mountPoint else { continue }
             blockers.formUnion(ops.blockers(mountPoint: mountPoint))
             for image in imagesBacked(byVolumeAt: resolvedPath(mountPoint), in: images) {
-                blockers.insert("the disk image \(image.imagePath)")
+                blockers.insert("the disk image \(image.displayPath)")
             }
         }
         return .ready(volumes: mounted, blockers: blockers.sorted())
@@ -344,7 +344,7 @@ public final class Engine {
         // /System/Volumes is ever unmounted, whatever a read says.
         let systemVolumes = targets.filter { isProtectedMountPoint($0.mountPoint) }
         for volume in systemVolumes {
-            notes.append("\(volume.displayName): refused, mounted at \(volume.mountPoint ?? "?"), which belongs to the running system")
+            notes.append("\(volume.displayName): refused, mounted at \(volume.displayMountPoint ?? "?"), which belongs to the running system")
         }
         let toUnmount = targets.filter { $0.isMounted && !isProtectedMountPoint($0.mountPoint) }
         guard !toUnmount.isEmpty else {
@@ -393,7 +393,7 @@ public final class Engine {
             for volume in toUnmount {
                 guard let mountPoint = volume.mountPoint else { continue }
                 for image in imagesBacked(byVolumeAt: resolvedPath(mountPoint), in: attachedImages) {
-                    progress("Detaching disk image \(image.imagePath)")
+                    progress("Detaching disk image \(image.displayPath)")
                     // The image's own volumes come down first. DADiskEject on
                     // the whole disk with them still mounted answers busy;
                     // `diskutil eject` only looks like one step because it does
@@ -419,7 +419,7 @@ public final class Engine {
                         // 0xc010" is not.
                         let inside = image.mountPoints.flatMap { ops.blockers(mountPoint: $0) }
                         let held = inside.isEmpty ? refusal : inside.joined(separator: ", ")
-                        notes.append("\(image.imagePath): still attached, held by \(held). It is backed by a file on \(volume.displayName), so that volume cannot unmount until the image lets go.")
+                        notes.append("\(image.displayPath): still attached, held by \(held). It is backed by a file on \(volume.displayName), so that volume cannot unmount until the image lets go.")
                     } else {
                         skipVolumes.formUnion(image.mountedVolumes)
                         for gone in before.disks.flatMap(\.allVolumes)
@@ -429,7 +429,7 @@ public final class Engine {
                         if let imageDisk = before.disks.first(where: { $0.device == image.wholeDisk }) {
                             mayVanish.formUnion(imageDisk.allVolumes.map(Self.key))
                         }
-                        notes.append("\(image.imagePath): disk image detached, it was backed by a file on \(volume.displayName)")
+                        notes.append("\(image.displayPath): disk image detached, it was backed by a file on \(volume.displayName)")
                     }
                 }
             }
@@ -752,6 +752,22 @@ public final class Engine {
 
     public func mount(onlyDisks: Set<String>? = nil,
                       progress: (String) -> Void = { _ in }) -> MountOutcome {
+        runMount(scope: onlyDisks.map(Scope.disks) ?? .everything, progress: progress)
+    }
+
+    /// Mounts exactly these volumes, and lifts the veto from exactly these.
+    ///
+    /// For the wake path, which exists to undo an automatic park and nothing
+    /// more. It used to mount everything and clear the whole veto, so a drive
+    /// parked by hand came back on the next wake along with the rest (audit,
+    /// Medium). A volume asked for that is no longer attached counts as not
+    /// mounted rather than vanishing from the total.
+    public func mount(volumeUUIDs: Set<String>,
+                      progress: (String) -> Void = { _ in }) -> MountOutcome {
+        runMount(scope: .volumes(Set(volumeUUIDs.map { $0.lowercased() })), progress: progress)
+    }
+
+    private func runMount(scope: Scope, progress: (String) -> Void) -> MountOutcome {
         guard let ops else {
             return MountOutcome(results: [], total: 0, mountedCount: 0,
                                 failure: "Disk Arbitration session unavailable. Nothing was mounted.")
@@ -764,22 +780,35 @@ public final class Engine {
                                 failure: "Could not read the disks, so nothing was mounted: \(error)")
         }
         timing.discover = Date().timeIntervalSince(started)
-        let disks = before.disks.filter { onlyDisks?.contains($0.device) ?? true }
-        if let onlyDisks {
-            let unknown = onlyDisks.subtracting(disks.map(\.device))
+
+        let disks: [PhysicalDisk]
+        let inScope: (Volume) -> Bool
+        var asked = 0
+        switch scope {
+        case .everything:
+            disks = before.disks
+            inScope = { _ in true }
+            // Drop the veto for exactly what is being mounted: all of it.
+            ops.vetoedVolumeUUIDs = []
+        case .disks(let names):
+            disks = before.disks.filter { names.contains($0.device) }
+            let unknown = names.subtracting(disks.map(\.device))
             guard unknown.isEmpty else {
                 return MountOutcome(results: [], total: 0, mountedCount: 0,
                                     failure: "No external disk named \(unknown.sorted().joined(separator: ", ")). Nothing was mounted.")
             }
-        }
-        // Drop the veto for exactly what is being mounted.
-        if onlyDisks == nil {
-            ops.vetoedVolumeUUIDs = []
-        } else {
+            inScope = { _ in true }
             let lifting = Set(disks.flatMap(\.allVolumes).compactMap { $0.uuid?.lowercased() })
             ops.vetoedVolumeUUIDs = ops.vetoedVolumeUUIDs.subtracting(lifting)
+        case .volumes(let uuids):
+            disks = before.disks.filter { $0.allVolumes.contains { $0.uuid.map(uuids.contains) ?? false } }
+            inScope = { $0.uuid.map(uuids.contains) ?? false }
+            asked = uuids.filter { !isIgnored($0) }.count
+            let lifting = ops.vetoedVolumeUUIDs.intersection(uuids)
+            if !lifting.isEmpty { ops.vetoedVolumeUUIDs = ops.vetoedVolumeUUIDs.subtracting(lifting) }
         }
-        let targets = disks.flatMap(\.allVolumes).filter { !isIgnored($0.uuid) }
+        let targets = disks.flatMap(\.allVolumes).filter { inScope($0) && !isIgnored($0.uuid) }
+        let targetDevices = Set(targets.map(\.device))
 
         // Concurrent per disk, for the same reason the park is. Measured
         // 2026-09-08 with the drives spun down after a park: each mount sat 8
@@ -791,7 +820,6 @@ public final class Engine {
         let mountStarted = Date()
         let lock = NSLock()
         var indexed: [(disk: Int, volume: Int, result: VolumeMountResult)] = []
-        let isIgnored = self.isIgnored
         withoutActuallyEscaping(progress) { progress in
             let report: (String) -> Void = { line in
                 lock.lock(); defer { lock.unlock() }
@@ -800,7 +828,7 @@ public final class Engine {
             DispatchQueue.concurrentPerform(iterations: disks.count) { diskIndex in
                 let disk = disks[diskIndex]
                 for (volumeIndex, volume) in disk.allVolumes.enumerated()
-                where !volume.isMounted && !isIgnored(volume.uuid) {
+                where !volume.isMounted && targetDevices.contains(volume.device) {
                     report("Mounting \(volume.displayName)")
                     let volumeStarted = Date()
                     let result = ops.mount(volumeBSDName: volume.device)
@@ -827,7 +855,7 @@ public final class Engine {
         do { after = try discovery.discover() } catch {
             timing.verify = Date().timeIntervalSince(verifyStarted)
             timing.total = Date().timeIntervalSince(started)
-            return MountOutcome(results: results, total: targets.count, mountedCount: 0,
+            return MountOutcome(results: results, total: max(targets.count, asked), mountedCount: 0,
                                 timing: timing,
                                 failure: "Asked macOS to mount, but could not verify: \(error)")
         }
@@ -839,7 +867,7 @@ public final class Engine {
         }.count
         timing.verify = Date().timeIntervalSince(verifyStarted)
         timing.total = Date().timeIntervalSince(started)
-        return MountOutcome(results: results, total: targets.count,
+        return MountOutcome(results: results, total: max(targets.count, asked),
                             mountedCount: mountedCount, timing: timing)
     }
 }

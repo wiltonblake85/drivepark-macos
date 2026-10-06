@@ -10,7 +10,12 @@ import DriveParkKit
 /// card are read once and gone; this survives in the unified log, so the
 /// next question about where the time went has an answer instead of a guess.
 ///
-///   log show --last 1h --predicate 'subsystem == "com.wiltonblake.drivepark"'
+/// Written at notice level. It was info until 2026-10-06, and macOS keeps a
+/// third-party subsystem's info lines in memory only: the query below found
+/// nothing at all for a park that had just run, so the record this comment
+/// promised did not exist. (In zsh, `log` is a builtin; call /usr/bin/log.)
+///
+///   /usr/bin/log show --last 1h --predicate 'subsystem == "com.wiltonblake.drivepark"'
 let parkLog = Logger(subsystem: "com.wiltonblake.drivepark", category: "park")
 
 @main
@@ -302,7 +307,33 @@ final class AppState: ObservableObject {
 
     // MARK: - Manual actions
 
-    func triggersNoteManualPark() { triggers.noteManualPark() }
+    /// True while a park started by a trigger is running, so a wake that
+    /// lands in the middle of it waits for it instead of finding nothing to
+    /// undo.
+    private(set) var triggerParkRunning = false
+
+    /// Takes volumes a person just parked or mounted out of the record of
+    /// what automatic parks took down, so the next wake leaves them as the
+    /// person left them. nil means the whole tower.
+    func forgetTriggerParks(onDisks devices: Set<String>?) {
+        guard let devices else {
+            Preferences.triggerParkedVolumeUUIDs = []
+            Preferences.legacyParkedByTrigger = false
+            return
+        }
+        let uuids = disks.filter { devices.contains($0.device) }
+            .flatMap(\.allVolumes).compactMap { $0.uuid?.lowercased() }
+        forgetTriggerParks(volumes: Set(uuids))
+    }
+
+    func forgetTriggerParks(volumes uuids: Set<String>) {
+        // The old flag names no volumes, so any action by hand retires it,
+        // as it always did.
+        Preferences.legacyParkedByTrigger = false
+        let current = Preferences.triggerParkedVolumeUUIDs
+        let kept = current.subtracting(uuids.map { $0.lowercased() })
+        if kept != current { Preferences.triggerParkedVolumeUUIDs = kept }
+    }
 
     private var forceOfferIsLive: Bool {
         guard !lastBlocked.isEmpty, let lastBlockedAt else { return false }
@@ -369,7 +400,7 @@ final class AppState: ObservableObject {
                         self.message = "Left alone. Nothing was forced."
                         return
                     }
-                    self.triggers.noteManualPark()
+                    self.forgetTriggerParks(volumes: Set(volumes.compactMap(\.uuid)))
                     self.runForce(uuids: Set(volumes.compactMap(\.uuid)),
                                   label: volumes.map(\.displayName).joined(separator: ", "))
                 }
@@ -406,15 +437,26 @@ final class AppState: ObservableObject {
     }
 
     func park(only: Set<String>? = nil, label: String? = nil) {
-        triggers.noteManualPark()
+        // Parked by hand now, so not the next wake's to undo.
+        forgetTriggerParks(onDisks: only)
         runPark(only: only, deadline: nil, label: label, completion: nil)
     }
 
+    /// A mount asked for by hand.
+    ///
     /// - Returns: false when it declined because something else is running.
     ///   Callers have to know, because a mount that quietly does nothing is
     ///   how the drives stayed parked after a wake on 2026-09-04.
     @discardableResult
     func mount(only: Set<String>? = nil, label: String? = nil) -> Bool {
+        guard startMount(subject: label ?? "All volumes", logAs: label ?? "manual",
+                         work: { $0.mount(onlyDisks: only) }) else { return false }
+        forgetTriggerParks(onDisks: only)
+        return true
+    }
+
+    private func startMount(subject: String, logAs: String,
+                            work: @escaping (Engine) -> MountOutcome) -> Bool {
         guard !busy else {
             Preferences.recordDiagnostic(
                 "mount", "declined: a park or mount was already running")
@@ -426,8 +468,8 @@ final class AppState: ObservableObject {
         message = "Mounting…"
         let engine = self.engine
         Task.detached {
-            let outcome = engine.mount(onlyDisks: only)
-            Self.record(outcome, trigger: label ?? "manual")
+            let outcome = work(engine)
+            Self.record(outcome, trigger: logAs)
             let (mounted, total) = (outcome.mountedCount, outcome.total)
             let split = String(format: " %.1fs.", outcome.timing.total)
             let read = Result { try engine.discover() }
@@ -437,14 +479,10 @@ final class AppState: ObservableObject {
                 self.busy = false
                 if let failure = outcome.failure {
                     self.message = failure
-                } else if let label {
-                    self.message = mounted == total
-                        ? "\(label) back online." + split
-                        : "\(label): \(mounted) of \(total) volumes mounted." + split
                 } else {
                     self.message = mounted == total
-                        ? "All volumes back online." + split
-                        : "\(mounted) of \(total) volumes mounted." + split
+                        ? "\(subject) back online." + split
+                        : "\(subject): \(mounted) of \(total) volumes mounted." + split
                 }
             }
         }
@@ -485,8 +523,13 @@ final class AppState: ObservableObject {
     /// So it waits its turn instead. Six tries at five seconds is half a
     /// minute, which covers the slow end of a measured park, and running out
     /// says so rather than going quiet.
-    func mount(reason: String) {
-        guard mount(only: nil, label: nil) else {
+    ///
+    /// It mounts only what automatic parks took down and nobody has touched by
+    /// hand since, and lifts the veto from only those. It used to mount
+    /// everything and drop the whole veto, so a drive parked by hand came back
+    /// on the next wake with the rest.
+    func mountAfterWake(reason: String) {
+        guard !busy else {
             wakeMountAttempts += 1
             guard wakeMountAttempts <= 6 else {
                 wakeMountAttempts = 0
@@ -498,14 +541,30 @@ final class AppState: ObservableObject {
             Preferences.recordDiagnostic(
                 "wake", "\(reason): busy, retry \(wakeMountAttempts) in 5s")
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-                self?.mount(reason: reason)
+                self?.mountAfterWake(reason: reason)
             }
             return
         }
         wakeMountAttempts = 0
+        let uuids = Preferences.triggerParkedVolumeUUIDs
+        let legacy = Preferences.legacyParkedByTrigger
+        // Spent whether or not every volume comes back. A wake mount that
+        // fails is reported once, not retried on every wake after it.
+        Preferences.triggerParkedVolumeUUIDs = []
+        Preferences.legacyParkedByTrigger = false
+        guard !uuids.isEmpty || legacy else {
+            Preferences.recordDiagnostic(
+                "wake", "\(reason): nothing left to mount, everything the automatic park took down was parked or mounted by hand since")
+            return
+        }
         // No message here on purpose. The mount sets one when it finishes and
         // has counted what actually mounted.
-        Preferences.recordDiagnostic("wake", "\(reason): mount started")
+        _ = startMount(subject: "Drives parked automatically", logAs: "wake",
+                       work: uuids.isEmpty ? { $0.mount(onlyDisks: nil) }
+                                           : { $0.mount(volumeUUIDs: uuids) })
+        Preferences.recordDiagnostic("wake", uuids.isEmpty
+            ? "\(reason): mount started for everything, parked by an earlier build"
+            : "\(reason): mount started for \(uuids.count) volume(s) the automatic park took down")
     }
 
     /// Bounded, so a permanently busy app cannot spin forever.
@@ -529,6 +588,7 @@ final class AppState: ObservableObject {
                 "mount", "command line request declined: a park or mount was already running")
             return
         }
+        forgetTriggerParks(onDisks: request.disks)
         busy = true
         lastBlocked = []
         lastBlockedAt = nil
@@ -572,6 +632,7 @@ final class AppState: ObservableObject {
         lastBlocked = []
         lastBlockedAt = nil
         message = triggerLabel.map { "Parking because \($0)…" } ?? "Parking…"
+        triggerParkRunning = triggerLabel != nil
         startTicking()
         let engine = self.engine
         Task.detached {
@@ -613,6 +674,20 @@ final class AppState: ObservableObject {
         if offersForce && !outcome.parked {
             lastBlocked = outcome.results.filter { !$0.success }
             lastBlockedAt = lastBlocked.isEmpty ? nil : Date()
+        }
+        if let trigger {
+            // What this automatic park took down is what the next wake may put
+            // back. Recorded even when the park as a whole did not verify:
+            // whatever it did unmount is still the trigger's doing.
+            triggerParkRunning = false
+            let tookDown = Set(outcome.results.filter(\.success)
+                .compactMap { $0.volume.uuid?.lowercased() })
+            if !tookDown.isEmpty {
+                Preferences.triggerParkedVolumeUUIDs =
+                    Preferences.triggerParkedVolumeUUIDs.union(tookDown)
+            }
+            Preferences.recordDiagnostic(
+                "wakeArm", "park because \(trigger) took down \(tookDown.count) volume(s)")
         }
         notify(outcome, scoped: scoped)
     }
@@ -730,34 +805,34 @@ final class AppState: ObservableObject {
     /// Public values only: volume names, device nodes, seconds, attempt counts.
     nonisolated private static func record(_ outcome: ParkOutcome, trigger: String) {
         guard outcome.didWork else {
-            parkLog.info("park (\(trigger, privacy: .public)): nothing to do")
+            parkLog.notice("park (\(trigger, privacy: .public)): nothing to do")
             return
         }
-        parkLog.info("park (\(trigger, privacy: .public)): \(outcome.timing.summary, privacy: .public)")
+        parkLog.notice("park (\(trigger, privacy: .public)): \(outcome.timing.summary, privacy: .public)")
         for result in outcome.results {
             let verdict = result.success ? "unmounted" : "FAILED"
             let line = String(format: "%@ (%@): %@ in %.2fs, %d attempt(s)",
                               result.volume.displayName, result.volume.device,
                               verdict, result.duration, result.attempts)
-            parkLog.info("  \(line, privacy: .public)")
+            parkLog.notice("  \(line, privacy: .public)")
         }
         for note in outcome.notes {
-            parkLog.info("  \(note, privacy: .public)")
+            parkLog.notice("  \(note, privacy: .public)")
         }
     }
 
     nonisolated private static func record(_ outcome: MountOutcome, trigger: String) {
         guard !outcome.results.isEmpty else {
-            parkLog.info("mount (\(trigger, privacy: .public)): nothing to do")
+            parkLog.notice("mount (\(trigger, privacy: .public)): nothing to do")
             return
         }
-        parkLog.info("mount (\(trigger, privacy: .public)): \(outcome.summary, privacy: .public)")
+        parkLog.notice("mount (\(trigger, privacy: .public)): \(outcome.summary, privacy: .public)")
         for result in outcome.results {
             let verdict = result.success ? "mounted" : "FAILED \(result.detail ?? "")"
             let line = String(format: "%@ (%@): %@ in %.2fs",
                               result.volume.displayName, result.volume.device,
                               verdict, result.duration)
-            parkLog.info("  \(line, privacy: .public)")
+            parkLog.notice("  \(line, privacy: .public)")
         }
     }
 
@@ -831,7 +906,6 @@ final class AppState: ObservableObject {
     /// a toggle is safe here: you always hear which way it went.
     func hotKeyPressed() {
         guard !busy, !volumes.isEmpty else { return }
-        triggers.noteManualPark()
         if nothingToPark {
             mount()
         } else {
@@ -1019,7 +1093,6 @@ struct MenuContent: View {
         }
         Divider()
         Button(state.busy ? "Working…" : "Park Tower") {
-            state.triggersNoteManualPark()
             state.park()
         }
 

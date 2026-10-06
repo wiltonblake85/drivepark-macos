@@ -5,6 +5,20 @@ import DriveParkKit
 
 setvbuf(stdout, nil, _IONBF, 0)
 
+/// Every line this tool prints passes through here.
+///
+/// Outside text is escaped where it is built (see printable), so a newline in
+/// a volume name cannot forge a line of its own. This is the second net, for
+/// a terminal escape sequence from anywhere that was missed: only the line
+/// breaks this file wrote itself survive.
+func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
+    let text = items.map { "\($0)" }.joined(separator: separator)
+    let safe = text.split(separator: "\n", omittingEmptySubsequences: false)
+        .map { printable(String($0)) }
+        .joined(separator: "\n")
+    Swift.print(safe, terminator: terminator)
+}
+
 /// The disks, for commands that only need names and UUIDs. A read that did
 /// not finish still knows what diskutil listed, and that is enough to find a
 /// volume by name; it is never enough to say anything is safe.
@@ -46,7 +60,7 @@ func printStatus() {
     for disk in disks {
         if disk.infoAnswered {
             let media = disk.removableMedia ? "removable" : "FIXED (eject cannot detach)"
-            print("\(disk.device)  \(disk.mediaName)  \(formatSize(disk.sizeBytes))  \(disk.busProtocol)  media: \(media)")
+            print("\(disk.device)  \(printable(disk.mediaName))  \(formatSize(disk.sizeBytes))  \(printable(disk.busProtocol))  media: \(media)")
         } else {
             print("\(disk.device)  NOT ANSWERING (diskutil info timed out; volumes below come from diskutil list)")
         }
@@ -55,17 +69,17 @@ func printStatus() {
             for volume in container.volumes {
                 total += 1
                 if volume.isMounted { mounted += 1 }
-                let state = volume.isMounted ? "MOUNTED at \(volume.mountPoint ?? "?")" : "unmounted"
+                let state = volume.isMounted ? "MOUNTED at \(volume.displayMountPoint ?? "?")" : "unmounted"
                 let tag = Preferences.isIgnored(volume.uuid) ? "  [IGNORED, DrivePark leaves this alone]" : ""
-                print("    volume \"\(volume.name)\" (\(volume.device)) — \(state)\(tag)")
+                print("    volume \"\(printable(volume.name))\" (\(volume.device)) — \(state)\(tag)")
             }
         }
         for volume in disk.directVolumes {
             total += 1
             if volume.isMounted { mounted += 1 }
-            let state = volume.isMounted ? "MOUNTED at \(volume.mountPoint ?? "?")" : "unmounted"
+            let state = volume.isMounted ? "MOUNTED at \(volume.displayMountPoint ?? "?")" : "unmounted"
             let tag = Preferences.isIgnored(volume.uuid) ? "  [IGNORED, DrivePark leaves this alone]" : ""
-            print("    volume \"\(volume.name)\" (\(volume.device), non-APFS) — \(state)\(tag)")
+            print("    volume \"\(printable(volume.name))\" (\(volume.device), non-APFS) — \(state)\(tag)")
         }
         print("")
     }
@@ -101,7 +115,7 @@ func printStatus() {
                 guard let mountPoint = volume.mountPoint else { continue }
                 if Preferences.isIgnored(volume.uuid) { continue }
                 for image in imagesBacked(byVolumeAt: resolvedPath(mountPoint), in: images) {
-                    inTheWay.append((image.imagePath, volume.displayName))
+                    inTheWay.append((image.displayPath, volume.displayName))
                 }
             }
         }

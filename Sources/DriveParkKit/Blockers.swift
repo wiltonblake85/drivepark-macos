@@ -22,7 +22,9 @@ func parseLsofBlockers(_ text: String) -> [String] {
         if line.hasPrefix("p") {
             currentPid = String(line.dropFirst())
         } else if line.hasPrefix("c") {
-            names.insert("\(String(line.dropFirst())) (pid \(currentPid))")
+            // A process names itself, so its name is outside text like any
+            // volume name.
+            names.insert("\(printable(String(line.dropFirst()))) (pid \(currentPid))")
         }
     }
     return names.sorted()
