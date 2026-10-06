@@ -106,7 +106,7 @@ final class TriggerCoordinator {
 
     private func fire(_ trigger: ParkTrigger) {
         guard Preferences.isEnabled(trigger), let state, !state.volumes.isEmpty else { return }
-        guard !state.isParked else { return }
+        guard !state.nothingToPark else { return }
         pendingMount?.cancel()
         parkedByTrigger = true
         Preferences.recordDiagnostic("wakeArm", "\(trigger.rawValue) park, parkedByTrigger set")

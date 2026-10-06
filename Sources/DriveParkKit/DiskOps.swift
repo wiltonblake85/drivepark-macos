@@ -1,4 +1,4 @@
-// DiskOps.swift — Disk Arbitration operations. Callbacks report what the
+// DiskOps.swift: Disk Arbitration operations. Callbacks report what the
 // request returned; truth about system state always comes from a fresh read.
 
 import Foundation
@@ -9,23 +9,87 @@ func daReturn(_ value: Int) -> DAReturn {
     DAReturn(bitPattern: UInt32(truncatingIfNeeded: value))
 }
 
-struct OpResult {
-    let success: Bool
-    let detail: String?
-    let busy: Bool
+public struct OpResult {
+    public let success: Bool
+    /// What macOS said when it refused, kept word for word. A dissenter's own
+    /// string ("Parked by DrivePark", or whatever backupd says mid-backup) is
+    /// sometimes the only clue to who is holding a volume when lsof sees
+    /// nothing.
+    public let detail: String?
+    public let busy: Bool
+
+    public init(success: Bool, detail: String? = nil, busy: Bool = false) {
+        self.success = success
+        self.detail = detail
+        self.busy = busy
+    }
 }
 
-/// Volume UUIDs currently under park veto (read by the C approval callback).
-var parkedVolumeUUIDs: Set<String> = []
+/// Everything Engine reads about the disks. Behind a protocol so tests can
+/// hand the engine a fresh read that fails on cue.
+public protocol DiskDiscovering {
+    /// A fresh read. Throws when any part of it failed or timed out.
+    func discover() throws -> DiskSnapshot
+    /// Attached disk images, or nil when hdiutil did not answer.
+    func attachedImages() -> [AttachedImage]?
+}
 
-final class DiskOps {
+public struct SystemDiscovery: DiskDiscovering {
+    public init() {}
+    public func discover() throws -> DiskSnapshot { try discoverExternalDisks() }
+    public func attachedImages() -> [AttachedImage]? { readAttachedImages() }
+}
+
+/// Everything Engine does to the disks.
+public protocol DiskOperating: AnyObject {
+    func unmount(volumeBSDName: String, force: Bool) -> OpResult
+    func mount(volumeBSDName: String) -> OpResult
+    func eject(diskBSDName: String) -> OpResult
+    func isAttached(diskBSDName: String) -> Bool
+    /// The processes holding files open under a mount point.
+    func blockers(mountPoint: String) -> [String]
+    /// Volume UUIDs whose remount is refused. Setting it changes the veto at
+    /// once and publishes who holds it.
+    var vetoedVolumeUUIDs: Set<String> { get set }
+}
+
+/// The veto set, read by the Disk Arbitration callback on its own queue and
+/// written by the engine from whichever thread a park runs on. It used to be
+/// a bare global with no lock.
+final class VetoSet: @unchecked Sendable {
+    private let lock = NSLock()
+    private var uuids: Set<String> = []
+
+    var value: Set<String> {
+        get { lock.lock(); defer { lock.unlock() }; return uuids }
+        set { lock.lock(); uuids = newValue; lock.unlock() }
+    }
+
+    func contains(_ uuid: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return uuids.contains(uuid)
+    }
+}
+
+final class DiskOps: DiskOperating {
     private let queue = DispatchQueue(label: "park.diskops", qos: .userInitiated)
     private let session: DASession
+    private let veto = VetoSet()
+    private var vetoRegistered = false
 
     init?() {
         guard let created = DASessionCreate(kCFAllocatorDefault) else { return nil }
         DASessionSetDispatchQueue(created, queue)
         session = created
+    }
+
+    deinit {
+        if vetoRegistered {
+            DAUnregisterCallback(
+                session, unsafeBitCast(Self.approvalCallback, to: UnsafeMutableRawPointer.self),
+                Unmanaged.passUnretained(veto).toOpaque())
+        }
+        DASessionSetDispatchQueue(session, nil)
     }
 
     private final class CallbackBox {
@@ -67,7 +131,7 @@ final class DiskOps {
         return box.result
     }
 
-    func unmount(volumeBSDName: String, force: Bool = false) -> OpResult {
+    func unmount(volumeBSDName: String, force: Bool) -> OpResult {
         perform("unmount", on: volumeBSDName, timeout: 30) { disk, context in
             let options = DADiskUnmountOptions(force ? kDADiskUnmountOptionForce : kDADiskUnmountOptionDefault)
             DADiskUnmount(disk, options, Self.operationCallback, context)
@@ -92,19 +156,42 @@ final class DiskOps {
         return !description.isEmpty
     }
 
-    /// Registers a mount-approval veto for volumes in `parkedVolumeUUIDs`.
+    func blockers(mountPoint: String) -> [String] {
+        lsofBlockers(mountPoint: mountPoint)
+    }
+
+    var vetoedVolumeUUIDs: Set<String> {
+        get { veto.value }
+        set {
+            veto.value = newValue
+            // Say out loud who is holding it. The veto lives in this process's
+            // memory and no other process can lift it, so a second process
+            // needs to be able to find out that this one exists.
+            VetoBroker.publishHold(newValue)
+        }
+    }
+
+    private static let approvalCallback: DADiskMountApprovalCallback = { disk, context in
+        guard let context,
+              let description = DADiskCopyDescription(disk) as? [NSString: Any],
+              let rawUUID = description[kDADiskDescriptionVolumeUUIDKey] else { return nil }
+        let cfValue = rawUUID as CFTypeRef
+        guard CFGetTypeID(cfValue) == CFUUIDGetTypeID() else { return nil }
+        let uuid = (CFUUIDCreateString(kCFAllocatorDefault, (cfValue as! CFUUID)) as String).lowercased()
+        let veto = Unmanaged<VetoSet>.fromOpaque(context).takeUnretainedValue()
+        guard veto.contains(uuid) else { return nil }
+        let name = (description[kDADiskDescriptionVolumeNameKey] as? String) ?? "volume"
+        print("Vetoed remount of \"\(name)\" while parked.")
+        let dissenter = DADissenterCreate(kCFAllocatorDefault, daReturn(kDAReturnExclusiveAccess), "Parked by DrivePark" as CFString)
+        return Unmanaged.passRetained(dissenter)
+    }
+
+    /// Registers a mount-approval veto for the UUIDs in `vetoedVolumeUUIDs`.
+    /// Inert while that set is empty.
     func startMountVeto() {
-        DARegisterDiskMountApprovalCallback(session, nil, { disk, _ -> Unmanaged<DADissenter>? in
-            guard let description = DADiskCopyDescription(disk) as? [NSString: Any],
-                  let rawUUID = description[kDADiskDescriptionVolumeUUIDKey] else { return nil }
-            let cfValue = rawUUID as CFTypeRef
-            guard CFGetTypeID(cfValue) == CFUUIDGetTypeID() else { return nil }
-            let uuid = (CFUUIDCreateString(kCFAllocatorDefault, (cfValue as! CFUUID)) as String).lowercased()
-            guard parkedVolumeUUIDs.contains(uuid) else { return nil }
-            let name = (description[kDADiskDescriptionVolumeNameKey] as? String) ?? "volume"
-            print("Vetoed remount of \"\(name)\" while parked.")
-            let dissenter = DADissenterCreate(kCFAllocatorDefault, daReturn(kDAReturnExclusiveAccess), "Parked by DrivePark" as CFString)
-            return Unmanaged.passRetained(dissenter)
-        }, nil)
+        guard !vetoRegistered else { return }
+        DARegisterDiskMountApprovalCallback(session, nil, Self.approvalCallback,
+                                            Unmanaged.passUnretained(veto).toOpaque())
+        vetoRegistered = true
     }
 }
