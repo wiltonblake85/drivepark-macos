@@ -119,7 +119,7 @@ final class TimeMachineTests: XCTestCase {
         guard case .ready(_, let blockers) = engine(discovery, FakeOps(), backups: backups)
             .checkForce(volumeUUIDs: [Tower.backup])
         else { return XCTFail("expected a force offer") }
-        XCTAssertEqual(blockers, ["Time Machine, backing up to Backup"])
+        XCTAssertEqual(blockers, ["Time Machine (a backup to Backup is running)"])
     }
 
     // MARK: - Reading tmutil

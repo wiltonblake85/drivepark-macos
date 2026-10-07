@@ -7,7 +7,7 @@
 // refused with the volumes named, so the menu or the CLI can ask them, and
 // runs only once they say yes.
 //
-// Read with tmutil, which is the one public interface. It runs once per park,
+// Read with tmutil, which is the one public interface. Two launches per park,
 // never on a refresh, so it adds nothing to the idle cost.
 
 import Foundation
@@ -16,7 +16,7 @@ import Foundation
 public struct BackupStatus: Equatable {
     public var running: Bool
     /// Mount points of the destinations Time Machine has configured and
-    /// mounted. Read only while a backup is running.
+    /// mounted.
     public var destinationMountPoints: Set<String>
     /// The mount point of the destination the running backup writes to, when
     /// Time Machine says which.
@@ -53,6 +53,18 @@ public enum BackupCheck: Equatable {
     case backingUp([Volume])
 }
 
+/// The volumes in a park that Time Machine backs up to, running or not.
+/// Parking one stops backups to it until it is mounted again, which is worth
+/// a line in the report even when nothing is running.
+public func timeMachineDestinations(in volumes: [Volume], status: BackupStatus?,
+                                    isDestination: (Volume) -> Bool) -> [Volume] {
+    let known = Set((status?.destinationMountPoints ?? []).map(resolvedPath))
+    return volumes.filter { volume in
+        guard let point = volume.mountPoint else { return false }
+        return known.contains(resolvedPath(point)) || isDestination(volume)
+    }
+}
+
 /// The decision, a pure function of what was read.
 public func backupCheck(toUnmount volumes: [Volume], status: BackupStatus?,
                         isDestination: (Volume) -> Bool) -> BackupCheck {
@@ -86,9 +98,8 @@ public struct SystemBackups: BackupReading {
         guard let status = runPlistTool("/usr/bin/tmutil", ["status", "-X"], timeout: 5) else {
             return nil
         }
-        guard Self.isRunning(status) else { return BackupStatus(running: false) }
-        // Only asked while a backup runs: a park on a Mac that is not backing
-        // up costs one tmutil launch, not two.
+        // Both, on every park (never on a refresh): the destinations are what
+        // let a park say it is parking one, backup or not.
         let destinations = runPlistTool("/usr/bin/tmutil", ["destinationinfo", "-X"], timeout: 5)
         return Self.parse(status: status, destinations: destinations)
     }

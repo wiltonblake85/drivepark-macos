@@ -125,6 +125,28 @@ final class DiscoveryAssemblyTests: XCTestCase {
                                                   mountPoint: "/Volumes/DPSTICK", uuid: nil)])
     }
 
+    func testStickUUIDIsFilledInFromDiskutilInfo() {
+        // The list left it out; `diskutil info` had it, captured 2026-10-06.
+        let assembled = assemble(boot: boot, info: { device in
+            device == "disk20"
+                ? .plist(["VolumeName": "DPSTICK", "VolumeUUID": "E984B669-8189-3EB0-B59C-324AF2494103"])
+                : self.info(device)
+        })
+        XCTAssertTrue(assembled.problems.isEmpty)
+        XCTAssertEqual(assembled.disks.first { $0.device == "disk20" }?.allVolumes.first?.uuid,
+                       "e984b669-8189-3eb0-b59c-324af2494103")
+    }
+
+    func testStickWhoseInfoStallsMakesTheReadIncomplete() {
+        let assembled = assemble(boot: boot, info: { device in
+            device == "disk20"
+                ? .failed(reason: "diskutil info -plist disk20 did not answer in 10s", timedOut: true)
+                : self.info(device)
+        })
+        XCTAssertTrue(assembled.timedOut)
+        XCTAssertFalse(assembled.problems.isEmpty)
+    }
+
     func testSystemRoleVolumesOnAnExternalDiskAreSkipped() {
         let bottom = assemble(boot: boot).disks.first { $0.device == "disk21" }
         XCTAssertEqual(bottom?.allVolumes.map(\.device), ["disk22s1"])
