@@ -498,7 +498,7 @@ final class AppState: ObservableObject {
     ///   how the drives stayed parked after a wake on 2026-09-04.
     @discardableResult
     func mount(only: Set<String>? = nil, label: String? = nil) -> Bool {
-        guard startMount(subject: label ?? "All volumes", logAs: label ?? "manual",
+        guard startMount(subject: label ?? "All volumes", logAs: label == nil ? "manual" : "manual, one drive",
                          work: { $0.mount(onlyDisks: only) }) else { return false }
         forgetTriggerParks(onDisks: only)
         return true
@@ -689,7 +689,7 @@ final class AppState: ObservableObject {
             let outcome = engine.park(onlyDisks: only, deadline: deadline, backup: backup) { line in
                 Task { @MainActor in self.workingOn = line }
             }
-            Self.record(outcome, trigger: triggerLabel ?? label ?? "manual")
+            Self.record(outcome, trigger: triggerLabel ?? (label == nil ? "manual" : "manual, one drive"))
             let read = Self.read(after: outcome, engine: engine)
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -880,7 +880,13 @@ final class AppState: ObservableObject {
     }
 
     /// Writes the timing split and every volume's verdict to the unified log.
-    /// Public values only: volume names, device nodes, seconds, attempt counts.
+    ///
+    /// Timings, device nodes, verdicts and attempt counts are public, so
+    /// `log show` answers "where did the time go" on any build. Volume names,
+    /// the notes (which carry names and disk image paths) and macOS's refusal
+    /// text are private outside DEBUG (audit, Low): the unified log is
+    /// readable by any admin and travels in every sysdiagnose, and the name of
+    /// a drive is often the name of what is on it.
     nonisolated private static func record(_ outcome: ParkOutcome, trigger: String) {
         guard outcome.didWork else {
             parkLog.notice("park (\(trigger, privacy: .public)): nothing to do")
@@ -889,14 +895,10 @@ final class AppState: ObservableObject {
         parkLog.notice("park (\(trigger, privacy: .public)): \(outcome.timing.summary, privacy: .public)")
         for result in outcome.results {
             let verdict = result.success ? "unmounted" : "FAILED"
-            let line = String(format: "%@ (%@): %@ in %.2fs, %d attempt(s)",
-                              result.volume.displayName, result.volume.device,
-                              verdict, result.duration, result.attempts)
-            parkLog.notice("  \(line, privacy: .public)")
+            let detail = String(format: "%@ in %.2fs, %d attempt(s)", verdict, result.duration, result.attempts)
+            logVolume(result.volume, detail)
         }
-        for note in outcome.notes {
-            parkLog.notice("  \(note, privacy: .public)")
-        }
+        for note in outcome.notes { logNote(note) }
     }
 
     nonisolated private static func record(_ outcome: MountOutcome, trigger: String) {
@@ -906,12 +908,27 @@ final class AppState: ObservableObject {
         }
         parkLog.notice("mount (\(trigger, privacy: .public)): \(outcome.summary, privacy: .public)")
         for result in outcome.results {
-            let verdict = result.success ? "mounted" : "FAILED \(result.detail ?? "")"
-            let line = String(format: "%@ (%@): %@ in %.2fs",
-                              result.volume.displayName, result.volume.device,
-                              verdict, result.duration)
-            parkLog.notice("  \(line, privacy: .public)")
+            logVolume(result.volume, String(format: "%@ in %.2fs",
+                                            result.success ? "mounted" : "FAILED", result.duration))
+            if !result.success, let why = result.detail { logNote("  \(result.volume.device): \(why)") }
         }
+    }
+
+    /// One volume's line: the name private, the rest public.
+    nonisolated private static func logVolume(_ volume: Volume, _ detail: String) {
+        #if DEBUG
+        parkLog.notice("  \(volume.displayName, privacy: .public) (\(volume.device, privacy: .public)): \(detail, privacy: .public)")
+        #else
+        parkLog.notice("  \(volume.displayName, privacy: .private) (\(volume.device, privacy: .public)): \(detail, privacy: .public)")
+        #endif
+    }
+
+    nonisolated private static func logNote(_ note: String) {
+        #if DEBUG
+        parkLog.notice("  \(note, privacy: .public)")
+        #else
+        parkLog.notice("  \(note, privacy: .private)")
+        #endif
     }
 
     private static func describe(_ outcome: ParkOutcome, label: String?,
