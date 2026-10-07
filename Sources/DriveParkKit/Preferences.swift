@@ -122,8 +122,14 @@ public enum Preferences {
     /// is its own bundle id, and every write then vanishes without error.
     /// That mistake has now been made twice in one day, so there is exactly
     /// one store and this is the only way to write to it.
+    ///
+    /// Written only when the value changes. Several of these are recorded on
+    /// every refresh or every watchdog tick with the same answer each time,
+    /// and every write is cfprefsd rewriting the domain on disk (audit, Low).
     public static func recordDiagnostic(_ key: String, _ value: String) {
-        store.set(value, forKey: "diag_\(key)")
+        let full = "diag_\(key)"
+        guard store.string(forKey: full) != value else { return }
+        store.set(value, forKey: full)
     }
 
     // MARK: - The global shortcut
@@ -180,9 +186,10 @@ public enum Preferences {
     // used to say whether it was.
 
     private static let heartbeatKey = "lastHeartbeat"
-    /// Refresh runs every 30 s, so anything past a couple of minutes is dead
-    /// rather than briefly busy.
-    public static let heartbeatStaleAfter: TimeInterval = 150
+    /// The backstop read runs every 5 minutes (it was every 30 s until
+    /// 2026-10-07), so anything past two of those is dead rather than briefly
+    /// busy.
+    public static let heartbeatStaleAfter: TimeInterval = 660
 
     public static func recordHeartbeat() {
         store.set(Date().timeIntervalSince1970, forKey: heartbeatKey)
@@ -390,12 +397,39 @@ extension Preferences {
         }
     }
 
-    /// The watchdog ticks every 5 s, so twenty seconds of silence is dead
-    /// rather than briefly busy.
-    public static let watchdogStaleAfter: TimeInterval = 20
+    /// The watchdog writes its heartbeat at most once a minute, so two and a
+    /// half minutes of silence is dead rather than briefly busy.
+    public static let watchdogStaleAfter: TimeInterval = 150
+    public static let watchdogHeartbeatEvery: TimeInterval = 60
 
+    /// Written at most once a minute. It was written on every 5 s tick, which
+    /// was a preferences write every 5 s, forever, on a Mac doing nothing
+    /// (audit, Low).
     public static func recordWatchdogHeartbeat() {
-        store.set(Date().timeIntervalSince1970, forKey: watchdogHeartbeatKey)
+        let now = Date().timeIntervalSince1970
+        let last = store.double(forKey: watchdogHeartbeatKey)
+        guard now - last >= watchdogHeartbeatEvery || now < last else { return }
+        store.set(now, forKey: watchdogHeartbeatKey)
+    }
+
+    private static let watchdogGaveUpKey = "watchdogGaveUpAt"
+
+    /// Set when the watchdog stopped restarting a crashing app, read and
+    /// cleared by the app the next time a person starts it, so that the
+    /// stop is said out loud once rather than only noticed as a gap in the
+    /// menu bar.
+    public static var watchdogGaveUpAt: Date? {
+        get {
+            let stamp = store.double(forKey: watchdogGaveUpKey)
+            return stamp > 0 ? Date(timeIntervalSince1970: stamp) : nil
+        }
+        set {
+            if let newValue {
+                store.set(newValue.timeIntervalSince1970, forKey: watchdogGaveUpKey)
+            } else {
+                store.removeObject(forKey: watchdogGaveUpKey)
+            }
+        }
     }
 
     /// What the menu reads to decide whether "on" is telling the truth.

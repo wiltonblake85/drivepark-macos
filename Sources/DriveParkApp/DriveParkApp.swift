@@ -121,15 +121,25 @@ final class AppState: ObservableObject {
     /// Set when the last read did not finish. Nothing on screen is verified
     /// while this is set, and the icon never shows the checkmark.
     @Published var readFailure: String?
-    @Published var busy = false
+    @Published var busy = false {
+        didSet {
+            // A disk changed while a park or a mount had the floor. Its own
+            // verifying read may already cover it, but one more read is cheap
+            // and an unnoticed mount is not.
+            if oldValue, !busy, refreshOwed { refresh() }
+        }
+    }
     @Published var message = ""
     @Published var lastVerifiedAt: Date?
     @Published var lastFailedReadAt: Date?
     @Published var enclosureStalled = false
-    /// Guards the 30-second timer. Before diskutil calls had a timeout, a
-    /// stalled enclosure made this timer stack a new hung child process every
-    /// 30 seconds, forever, in silence.
+    /// Guards against overlapping reads. Before diskutil calls had a timeout,
+    /// a stalled enclosure made the refresh timer stack a new hung child
+    /// process every 30 seconds, forever, in silence.
     private var refreshing = false
+    /// A read was asked for while another read, a park or a mount was
+    /// running. It happens as soon as that finishes, rather than being lost.
+    private var refreshOwed = false
 
     // Mirrors of persisted preferences, so SwiftUI sees the changes.
     @Published var enabledTriggers: Set<ParkTrigger> = Preferences.enabledTriggers
@@ -166,6 +176,14 @@ final class AppState: ObservableObject {
     let engine = Engine()
     private let triggers = TriggerCoordinator()
     private var timer: Timer?
+    private let diskEvents = DiskEvents()
+
+    /// The backstop read. Disk Arbitration's events drive the reads now; this
+    /// catches what they cannot, an enclosure that stops answering without
+    /// anything appearing or disappearing, and the power assertions behind
+    /// the trigger warnings. It was every 30 s, around 17,000 process
+    /// launches a day on an idle Mac (audit, Low).
+    static let backstopInterval: TimeInterval = 300
 
     init() {
         AppState.shared = self
@@ -175,8 +193,24 @@ final class AppState: ObservableObject {
         triggers.state = self
         triggers.start()
         if let failure = triggers.powerWatchFailure { message = failure }
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        if let gaveUp = Preferences.watchdogGaveUpAt {
+            message = Watchdog.gaveUpSentence(at: gaveUp)
+            Preferences.watchdogGaveUpAt = nil
+        }
+        let timer = Timer(timeInterval: Self.backstopInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
+        }
+        timer.tolerance = 30
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        if let diskEvents {
+            diskEvents.start { [weak self] in
+                Task { @MainActor in self?.refresh() }
+            }
+        } else {
+            // Without events, the backstop is the only way a new mount is
+            // seen, so say how slow that is.
+            message = "Disk Arbitration events unavailable: new mounts show up within 5 minutes."
         }
     }
 
@@ -276,8 +310,13 @@ final class AppState: ObservableObject {
     func refresh() {
         // Not during a park or a mount: a read that starts before one finishes
         // and lands after it would put an older state over the verified one.
-        guard !refreshing, !busy else { return }
+        // Owed instead, so a disk that changed in the meantime is still read.
+        guard !refreshing, !busy else {
+            refreshOwed = true
+            return
+        }
         refreshing = true
+        refreshOwed = false
         let engine = self.engine
         Task.detached {
             let read = Result { try engine.discover() }
@@ -305,6 +344,8 @@ final class AppState: ObservableObject {
                 if self.enclosureStalled, self.message.isEmpty || self.message.hasPrefix("Enclosure") {
                     self.message = "Enclosure not answering. Nothing can be verified until it does."
                 }
+                // A disk changed after this read began.
+                if self.refreshOwed, !self.busy { self.refresh() }
             }
         }
     }
@@ -705,6 +746,8 @@ final class AppState: ObservableObject {
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.objectWillChange.send() }
         }
+        // A whole-second readout does not need the wakeup on the dot.
+        tickTimer?.tolerance = 0.25
     }
 
     private func stopTicking() {

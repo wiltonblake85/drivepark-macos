@@ -91,6 +91,9 @@ enum LoginItem {
             // enabled while the watchdog process is dead, and a menu that
             // reads "on" over a watchdog that is not running is the exact
             // false assurance this app exists to refuse.
+            if Preferences.watchdogGaveUpAt != nil {
+                return "on, but it stopped restarting DrivePark after repeated crashes"
+            }
             return Preferences.watchdogLooksAlive
                 ? "on"
                 : "on, but the watchdog is not answering"

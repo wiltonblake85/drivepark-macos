@@ -51,8 +51,11 @@
 //     report on 2026-09-01. The script sets watchdogPausedUntil for the
 //     duration, and this checks the executable is really there besides.
 //
-//   - Relaunch forever. Five restarts inside a minute is a crash loop, not a
-//     rescue, so it backs off for a minute rather than fighting.
+//   - Relaunch forever. Five deaths inside ten minutes is a crash loop, not a
+//     rescue. It used to back off for a minute and start again, which was
+//     five relaunches a minute for as long as the Mac stayed up (audit, Low).
+//     Now it stops, records why, and the app says so the next time a person
+//     starts it (RelaunchBudget).
 //
 //   - Claim to be working when it is not. It writes a heartbeat every cycle and
 //     the menu reads it, so "on" in the menu means watched, not merely
@@ -82,9 +85,11 @@ final class Watchdog {
     /// was caught, because the failure is completely silent at runtime.
     static let shared = Watchdog()
 
-    /// Restart timestamps inside the last minute, for the crash-loop guard.
-    private var relaunches: [Date] = []
-    private var backoffUntil: Date?
+    /// The crash-loop guard.
+    private var budget = RelaunchBudget()
+    /// The fast path and the poll can both see one death before the
+    /// relaunch has landed; this keeps that from counting as two.
+    private var relaunchInFlightUntil: Date?
 
     /// Latched when a quit is seen, cleared when the app is seen running again.
     ///
@@ -127,9 +132,13 @@ final class Watchdog {
         // Backstop, and the one that cannot be missed. It covers a dropped
         // notification, and the case where the app was already gone before this
         // watchdog started.
-        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        // Every 15 s with 5 s of slack: the termination notice above is the
+        // fast path, so this only has to be sure, not quick.
+        let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
             self?.tick()
         }
+        timer.tolerance = 5
+        RunLoop.main.add(timer, forMode: .common)
         tick()
 
         RunLoop.main.run()
@@ -141,8 +150,9 @@ final class Watchdog {
         if appIsRunning {
             // Seeing it running is what ends a stand-down. The user opened it
             // again, so the watch resumes.
-            if standDown {
+            if standDown || budget.exhausted {
                 standDown = false
+                budget.reset()
                 Preferences.recordDiagnostic("watchdog", "app is back, watching again")
             }
             return
@@ -166,7 +176,10 @@ final class Watchdog {
         // reported again on every poll.
         if standDown { return }
 
-        if let until = backoffUntil, until > Date() { return }
+        // Gave up on a crash loop. Said once, when it happened.
+        if budget.exhausted { return }
+
+        if let until = relaunchInFlightUntil, until > Date() { return }
 
         // A half-written bundle is worse than no app at all. macOS kills it a
         // moment later with no crash report, which is the failure this whole
@@ -178,15 +191,11 @@ final class Watchdog {
         }
 
         let now = Date()
-        relaunches = relaunches.filter { now.timeIntervalSince($0) < 60 }
-        if relaunches.count >= 5 {
-            backoffUntil = now.addingTimeInterval(60)
-            relaunches.removeAll()
-            Preferences.recordDiagnostic("watchdog", "5 restarts in a minute, backing off")
+        guard budget.noteDeath(at: now) else {
+            giveUp(at: now)
             return
         }
-        relaunches.append(now)
-        backoffUntil = nil
+        relaunchInFlightUntil = now.addingTimeInterval(10)
 
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false
@@ -200,5 +209,29 @@ final class Watchdog {
                 Preferences.recordDiagnostic("watchdog", "relaunched after \(reason)")
             }
         }
+    }
+
+    /// Stops relaunching and leaves word for the person. The app shows it the
+    /// next time it starts, `park status` shows it until then, and if notch
+    /// cards are on, one goes up now, because this process has no menu.
+    private func giveUp(at date: Date) {
+        Preferences.watchdogGaveUpAt = date
+        Preferences.recordDiagnostic(
+            "watchdog", "\(RelaunchBudget.limit) crashes in \(Int(RelaunchBudget.window / 60)) minutes, stopped restarting")
+        Transom.postAndWait(
+            title: "DrivePark keeps crashing",
+            message: "The watchdog stopped restarting it. Automatic parking is off until you open DrivePark again.",
+            symbol: "exclamationmark.triangle.fill",
+            persistent: true)
+    }
+
+    /// The sentence for the menu and the CLI.
+    static func gaveUpSentence(at date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return "DrivePark crashed \(RelaunchBudget.limit) times in \(Int(RelaunchBudget.window / 60)) minutes "
+            + "and the watchdog stopped restarting it at \(formatter.string(from: date)). "
+            + "It is watching again now."
     }
 }

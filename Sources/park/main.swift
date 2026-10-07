@@ -160,8 +160,13 @@ func appLivenessLine() -> String {
     case ..<(60*48): howLong = "\(minutes / 60) hour(s) ago"
     default:         howLong = "\(minutes / 1440) day(s) ago"
     }
-    return "DrivePark app: NOT RUNNING. Last check-in \(howLong). "
+    var line = "DrivePark app: NOT RUNNING. Last check-in \(howLong). "
         + "Auto-park triggers and the global shortcut are all dead until it starts."
+    if Preferences.watchdogGaveUpAt != nil {
+        line += " It crashed \(RelaunchBudget.limit) times in \(Int(RelaunchBudget.window / 60)) minutes, "
+            + "so the watchdog stopped restarting it."
+    }
+    return line
 }
 
 
