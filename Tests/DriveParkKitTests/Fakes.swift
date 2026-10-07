@@ -49,6 +49,8 @@ final class FakeOps: DiskOperating {
     var unmountAnswers: [String: OpResult] = [:]
     /// Who lsof would name, by mount point.
     var holders: [String: [String]] = [:]
+    /// Devices that no longer hold the volume the engine read there.
+    var movedAway: Set<String> = []
 
     var events: [String] {
         lock.lock(); defer { lock.unlock() }
@@ -77,6 +79,11 @@ final class FakeOps: DiskOperating {
 
     /// Fixed media: an eject never detaches.
     func isAttached(diskBSDName: String) -> Bool { true }
+
+    func identifies(_ volume: Volume, atBSDName bsdName: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !movedAway.contains(bsdName)
+    }
 
     func blockers(mountPoint: String) -> [String] {
         lock.lock(); defer { lock.unlock() }

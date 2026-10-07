@@ -70,7 +70,8 @@ func printStatus() {
                 total += 1
                 if volume.isMounted { mounted += 1 }
                 let state = volume.isMounted ? "MOUNTED at \(volume.displayMountPoint ?? "?")" : "unmounted"
-                let tag = Preferences.isIgnored(volume.uuid) ? "  [IGNORED, DrivePark leaves this alone]" : ""
+                let tag = Preferences.isIgnored(volume.uuid) ? "  [IGNORED, DrivePark leaves this alone]"
+                    : volume.uuid == nil ? "  [no volume UUID: a park unmounts it but cannot keep it unmounted]" : ""
                 print("    volume \"\(printable(volume.name))\" (\(volume.device)) — \(state)\(tag)")
             }
         }
@@ -78,7 +79,8 @@ func printStatus() {
             total += 1
             if volume.isMounted { mounted += 1 }
             let state = volume.isMounted ? "MOUNTED at \(volume.displayMountPoint ?? "?")" : "unmounted"
-            let tag = Preferences.isIgnored(volume.uuid) ? "  [IGNORED, DrivePark leaves this alone]" : ""
+            let tag = Preferences.isIgnored(volume.uuid) ? "  [IGNORED, DrivePark leaves this alone]"
+                : volume.uuid == nil ? "  [no volume UUID: a park unmounts it but cannot keep it unmounted]" : ""
             print("    volume \"\(printable(volume.name))\" (\(volume.device), non-APFS) — \(state)\(tag)")
         }
         print("")

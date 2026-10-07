@@ -46,6 +46,11 @@ public protocol DiskOperating: AnyObject {
     func mount(volumeBSDName: String) -> OpResult
     func eject(diskBSDName: String) -> OpResult
     func isAttached(diskBSDName: String) -> Bool
+    /// Whether this BSD name still holds this volume, asked of Disk
+    /// Arbitration right before acting on it. Names are reused: a bay that
+    /// renumbers between the read and the operation leaves the old name on a
+    /// different volume, or on nothing.
+    func identifies(_ volume: Volume, atBSDName bsdName: String) -> Bool
     /// The processes holding files open under a mount point.
     func blockers(mountPoint: String) -> [String]
     /// Volume UUIDs whose remount is refused. Setting it changes the veto at
@@ -157,6 +162,27 @@ final class DiskOps: DiskOperating {
         return !description.isEmpty
     }
 
+    func identifies(_ volume: Volume, atBSDName bsdName: String) -> Bool {
+        guard let disk = disk(forBSDName: bsdName),
+              let description = DADiskCopyDescription(disk) as? [NSString: Any] else { return false }
+        let uuid = Self.volumeUUID(in: description)
+        if let expected = volume.uuid { return uuid == expected.lowercased() }
+        // No UUID to go on. A UUID appearing means a different volume; a
+        // different name, when there is one, means the same.
+        guard uuid == nil else { return false }
+        if let name = description[kDADiskDescriptionVolumeNameKey] as? String { return name == volume.name }
+        return true
+    }
+
+    /// The volume UUID in a Disk Arbitration description, lowercased the way
+    /// discovery stores it.
+    static func volumeUUID(in description: [NSString: Any]) -> String? {
+        guard let raw = description[kDADiskDescriptionVolumeUUIDKey] else { return nil }
+        let value = raw as CFTypeRef
+        guard CFGetTypeID(value) == CFUUIDGetTypeID() else { return nil }
+        return (CFUUIDCreateString(kCFAllocatorDefault, (value as! CFUUID)) as String).lowercased()
+    }
+
     func blockers(mountPoint: String) -> [String] {
         lsofBlockers(mountPoint: mountPoint)
     }
@@ -175,10 +201,7 @@ final class DiskOps: DiskOperating {
     private static let approvalCallback: DADiskMountApprovalCallback = { disk, context in
         guard let context,
               let description = DADiskCopyDescription(disk) as? [NSString: Any],
-              let rawUUID = description[kDADiskDescriptionVolumeUUIDKey] else { return nil }
-        let cfValue = rawUUID as CFTypeRef
-        guard CFGetTypeID(cfValue) == CFUUIDGetTypeID() else { return nil }
-        let uuid = (CFUUIDCreateString(kCFAllocatorDefault, (cfValue as! CFUUID)) as String).lowercased()
+              let uuid = DiskOps.volumeUUID(in: description) else { return nil }
         let veto = Unmanaged<VetoSet>.fromOpaque(context).takeUnretainedValue()
         guard veto.contains(uuid) else { return nil }
         let name = (description[kDADiskDescriptionVolumeNameKey] as? String) ?? "volume"

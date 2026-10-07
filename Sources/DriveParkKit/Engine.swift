@@ -433,6 +433,13 @@ public final class Engine {
         let armed = vetoBefore.union(targets.filter { !isProtectedMountPoint($0.mountPoint) }
             .compactMap { $0.uuid?.lowercased() })
         if armed != vetoBefore { ops.vetoedVolumeUUIDs = armed }
+        // The veto matches on volume UUID, so a volume without one is parked
+        // but not held: anything can mount it again. Said here, every park,
+        // rather than left for someone to find out (audit, Low).
+        for volume in toUnmount where volume.uuid == nil {
+            notes.append("\(volume.displayName) has no volume UUID, so DrivePark cannot keep it "
+                         + "unmounted: macOS or another app can mount it again.")
+        }
 
         // A disk image backed by a file on one of these volumes pins it.
         // Resolved here, before the unmount loop, and never as a rung on the
@@ -542,6 +549,7 @@ public final class Engine {
         // stopped answering every bay at once on 2026-08-31 is not a thing
         // to send three STOP UNIT commands to at once.
         let unmountStarted = Date()
+        let relocate = Self.relocator(discovery)
         let attempt = Set(toUnmount.map(\.device)).subtracting(skipVolumes)
         let lock = NSLock()
         var indexedResults: [(disk: Int, volume: Int, result: VolumeParkResult)] = []
@@ -560,7 +568,7 @@ public final class Engine {
                 where attempt.contains(volume.device) {
                     let result = Self.unmountWithRetries(
                         volume, ops: ops, ladder: ladder, deadline: deadline,
-                        force: force, progress: report)
+                        force: force, relocate: relocate, progress: report)
                     lock.lock()
                     indexedResults.append((diskIndex, volumeIndex, result))
                     lock.unlock()
@@ -758,12 +766,41 @@ public final class Engine {
         return .stillMounted
     }
 
+    /// Finds a volume on a fresh read by its UUID, answering its device now.
+    private static func relocator(_ discovery: DiskDiscovering) -> (String) -> String? {
+        { uuid in
+            (try? discovery.discover())?.disks.flatMap(\.allVolumes)
+                .first { $0.uuid == uuid.lowercased() }?.device
+        }
+    }
+
+    /// The device to act on for this volume at this moment, or nil when it
+    /// cannot be found.
+    ///
+    /// BSD names used to come from the read at the start of the run, up to
+    /// ~17 s old by the last rung of the retry ladder, with no check (audit,
+    /// Low). A bay that renumbers in that window leaves its old name on a
+    /// different volume or on nothing, and the next attempt would have acted
+    /// on whatever was there. Now Disk Arbitration is asked, right before
+    /// each operation, whether the name still holds this volume; when it does
+    /// not, the volume is looked up again by UUID on a fresh read. A volume
+    /// with no UUID cannot be looked up, so it is left alone.
+    static func currentDevice(of volume: Volume, lastKnown: String, ops: DiskOperating,
+                              relocate: (String) -> String?) -> String? {
+        if ops.identifies(volume, atBSDName: lastKnown) { return lastKnown }
+        guard let uuid = volume.uuid, let found = relocate(uuid),
+              ops.identifies(volume, atBSDName: found) else { return nil }
+        return found
+    }
+
     /// Climbs the retry ladder for one volume. Pure function of its inputs
     /// apart from the unmount itself, so it can run on any thread.
     private static func unmountWithRetries(_ volume: Volume, ops: DiskOperating,
                                            ladder: [TimeInterval], deadline: Date?,
                                            force: Bool,
+                                           relocate: (String) -> String?,
                                            progress: (String) -> Void) -> VolumeParkResult {
+        var device = volume.device
         var success = false
         var blockers: [String] = []
         var refusal: String?
@@ -790,12 +827,22 @@ public final class Engine {
                     Thread.sleep(forTimeInterval: delay)
                 }
             }
+            guard let now = currentDevice(of: volume, lastKnown: device, ops: ops, relocate: relocate) else {
+                refusal = "\(device) no longer holds \(volume.displayName) and it was not found again, "
+                    + "so it was not touched"
+                progress("\(volume.displayName): \(refusal ?? "")")
+                break
+            }
+            if now != device {
+                progress("\(volume.displayName) moved from \(device) to \(now)")
+                device = now
+            }
             progress("Unmounting \(volume.displayName), attempt \(attempt + 1)/\(ladder.count)")
             usedAttempts = attempt + 1
             if force {
                 progress("Forcing \(volume.displayName) unmounted, open files will lose unwritten data")
             }
-            let result = ops.unmount(volumeBSDName: volume.device, force: force)
+            let result = ops.unmount(volumeBSDName: device, force: force)
             if result.success { success = true; break }
             refusal = result.detail
             if let mountPoint = volume.mountPoint {
@@ -884,6 +931,7 @@ public final class Engine {
         // slowest one. No approval timeout here (Ejectify's callback was on
         // unmount), so what remains is physics.
         let mountStarted = Date()
+        let relocate = Self.relocator(discovery)
         let lock = NSLock()
         var indexed: [(disk: Int, volume: Int, result: VolumeMountResult)] = []
         withoutActuallyEscaping(progress) { progress in
@@ -897,7 +945,16 @@ public final class Engine {
                 where !volume.isMounted && targetDevices.contains(volume.device) {
                     report("Mounting \(volume.displayName)")
                     let volumeStarted = Date()
-                    let result = ops.mount(volumeBSDName: volume.device)
+                    // Same check as the unmount: the read this mount started
+                    // from can be older than the bay's current name.
+                    let result: OpResult
+                    if let device = Self.currentDevice(of: volume, lastKnown: volume.device,
+                                                       ops: ops, relocate: relocate) {
+                        result = ops.mount(volumeBSDName: device)
+                    } else {
+                        result = OpResult(success: false,
+                                          detail: "\(volume.device) no longer holds this volume and it was not found again")
+                    }
                     let duration = Date().timeIntervalSince(volumeStarted)
                     if !result.success {
                         report("\(volume.displayName) failed: \(result.detail ?? "unknown")")

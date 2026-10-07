@@ -219,6 +219,10 @@ final class AppState: ObservableObject {
     /// not be counted as something still to do.
     var volumes: [Volume] { allVolumes.filter { !Preferences.isIgnored($0.uuid) } }
     var mountedCount: Int { volumes.filter { $0.isMounted }.count }
+    /// Managed volumes the remount veto cannot hold, because it matches on a
+    /// volume UUID they do not have. A park unmounts them; nothing keeps them
+    /// unmounted, and the menu says so (audit, Low).
+    var unholdableVolumes: [Volume] { volumes.filter { $0.uuid == nil } }
     /// Nothing DrivePark manages is mounted, so a park would do nothing.
     ///
     /// Decides what the menu offers and which way the shortcut goes. It is not
@@ -1189,6 +1193,9 @@ struct MenuContent: View {
                 }
                 .disabled(state.busy)
             }
+        }
+        ForEach(state.unholdableVolumes, id: \.device) { volume in
+            Text("⚠︎ \(volume.displayName) has no volume UUID, so DrivePark cannot keep it unmounted")
         }
         Divider()
         Button(state.busy ? "Working…" : "Park Tower") {
