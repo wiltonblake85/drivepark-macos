@@ -348,6 +348,13 @@ public enum Preferences {
         return (stored?.isEmpty ?? true) ? nil : stored
     }
 
+    /// Moves a token left in preferences by an older build into the Keychain
+    /// now, rather than on the first card, which can be days away. Called at
+    /// launch.
+    public static func moveTransomTokenToKeychain() {
+        _ = transomToken
+    }
+
     /// Stores the token in the Keychain, or removes it for nil or empty.
     /// - Returns: false when the Keychain refused, so the caller can say so
     ///   instead of reporting a token saved that was not.

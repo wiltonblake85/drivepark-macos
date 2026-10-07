@@ -187,6 +187,8 @@ final class AppState: ObservableObject {
 
     init() {
         AppState.shared = self
+        // Out of plain-text preferences as soon as this build runs.
+        Preferences.moveTransomTokenToKeychain()
         refresh()
         Notifier.shared.requestAuthorizationIfNeeded()
         applyHotKey()
