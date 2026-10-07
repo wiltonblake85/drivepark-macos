@@ -158,8 +158,16 @@ public enum TriggerHealth {
 
     /// Armed triggers that cannot currently fire. The set worth warning about,
     /// because an unarmed trigger that cannot fire is nobody's problem.
+    ///
+    /// Only armed triggers are checked. It used to check all three and filter
+    /// afterwards, so the app ran `pmset -g` (up to 5 s) on every 30 s refresh
+    /// even with the sleep trigger off, on the main thread. It can still take
+    /// that long when the sleep trigger is armed, so call it off the main
+    /// thread.
     public static func armedButDead() -> [TriggerStatus] {
-        allStatuses().filter { Preferences.isEnabled($0.trigger) && !$0.canFire }
+        ParkTrigger.allCases.filter(Preferences.isEnabled)
+            .map(status(for:))
+            .filter { !$0.canFire }
     }
 
     /// Subject-verb agreement. "Claude and perplexityd is holding sleep off"

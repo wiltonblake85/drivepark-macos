@@ -216,6 +216,35 @@ public final class Engine {
         case disks(Set<String>)
         /// Lowercased volume UUIDs.
         case volumes(Set<String>)
+        /// Every disk that holds one of these volume UUIDs on the fresh read.
+        /// A drive named the way the menu sees it, found the way it is now.
+        case disksHolding(Set<String>)
+    }
+
+    /// Resolves a drive named by its volumes to the disks it is on right now.
+    private static func resolve(_ scope: Scope, in snapshot: DiskSnapshot) -> Scope? {
+        guard case .disksHolding(let uuids) = scope else { return scope }
+        let names = snapshot.disks
+            .filter { $0.allVolumes.contains { $0.uuid.map(uuids.contains) ?? false } }
+            .map(\.device)
+        return names.isEmpty ? nil : .disks(Set(names))
+    }
+
+    /// Parks the drive that holds these volumes, found on a fresh read.
+    ///
+    /// For the menu's per-drive buttons. They used to pass the disk's BSD name
+    /// from the last refresh, up to 30 s old, and a bay renumbered in that
+    /// time would have been a different drive by the time it was parked.
+    public func park(drivesHolding volumeUUIDs: Set<String>,
+                     progress: (String) -> Void = { _ in }) -> ParkOutcome {
+        run(scope: .disksHolding(Set(volumeUUIDs.map { $0.lowercased() })),
+            deadline: nil, force: false, progress: progress)
+    }
+
+    /// Mounts the drive that holds these volumes, found on a fresh read.
+    public func mount(drivesHolding volumeUUIDs: Set<String>,
+                      progress: (String) -> Void = { _ in }) -> MountOutcome {
+        runMount(scope: .disksHolding(Set(volumeUUIDs.map { $0.lowercased() })), progress: progress)
     }
 
     /// - Parameter deadline: when set, the retry ladder stops once passed. The
@@ -258,10 +287,16 @@ public final class Engine {
                             + " is no longer mounted.")
         }
         let images = discovery.attachedImages() ?? []
+        let timeMachine = discovery.timeMachine()
         var blockers: Set<String> = []
         for volume in mounted {
             guard let mountPoint = volume.mountPoint else { continue }
             blockers.formUnion(ops.blockers(mountPoint: mountPoint))
+            if timeMachine?.isBackingUp(to: mountPoint) == true {
+                // Forcing this one tears down a backup in progress. The
+                // prompt should say so in those words.
+                blockers.insert("Time Machine (a backup to \(volume.displayName) is running)")
+            }
             for image in imagesBacked(byVolumeAt: resolvedPath(mountPoint), in: images) {
                 blockers.insert("the disk image \(image.displayPath)")
             }
@@ -303,10 +338,15 @@ public final class Engine {
             return .refused("Could not read the disks before parking, so nothing was touched: \(error)")
         }
         timing.discover = Date().timeIntervalSince(started)
+        guard let scope = Self.resolve(scope, in: before) else {
+            return .refused("That drive is not on a fresh read; it may have been unplugged. Nothing was touched.")
+        }
 
         let disks: [PhysicalDisk]
         let inScope: (Volume) -> Bool
         switch scope {
+        case .disksHolding:
+            return .refused("That drive could not be found. Nothing was touched.")
         case .everything:
             disks = before.disks
             inScope = { _ in true }
@@ -355,6 +395,29 @@ public final class Engine {
             return ParkOutcome(stillMounted: systemVolumes, notes: notes, timing: timing,
                                snapshot: before,
                                safetyReason: before.verdict.reason(isIgnored: isIgnored))
+        }
+
+        // The veto matches on volume UUID, so a volume without one can be
+        // unmounted and never held that way. Discovery now fills in the UUIDs
+        // diskutil's list leaves out; any volume still without one is said
+        // out loud rather than left to remount in silence.
+        for volume in toUnmount where volume.uuid == nil {
+            notes.append("\(volume.displayName): has no volume UUID, so nothing can stop macOS mounting it again")
+        }
+
+        // Time Machine. Parking a destination stops backups to it, which
+        // should be said, and a backup in progress holds the volume through
+        // backupd, which a user-level lsof cannot see.
+        var timeMachineHolders: [String: [String]] = [:]
+        if let timeMachine = discovery.timeMachine() {
+            for volume in toUnmount {
+                guard let mountPoint = volume.mountPoint,
+                      timeMachine.destinationMountPoints.contains(mountPoint) else { continue }
+                notes.append("\(volume.displayName): Time Machine backs up here. Backups to it stop while it is parked and resume when it is mounted.")
+                if timeMachine.isBackingUp(to: mountPoint) {
+                    timeMachineHolders[volume.device] = ["Time Machine (a backup to this volume is running)"]
+                }
+            }
         }
 
         // The veto goes up before the first unmount, not after the last
@@ -494,7 +557,8 @@ public final class Engine {
                 where attempt.contains(volume.device) {
                     let result = Self.unmountWithRetries(
                         volume, ops: ops, ladder: ladder, deadline: deadline,
-                        force: force, progress: report)
+                        force: force, knownHolders: timeMachineHolders[volume.device] ?? [],
+                        progress: report)
                     lock.lock()
                     indexedResults.append((diskIndex, volumeIndex, result))
                     lock.unlock()
@@ -638,7 +702,8 @@ public final class Engine {
         let neighbours: [Volume]
         switch scope {
         case .everything: neighbours = after
-        case .disks: neighbours = snapshot.disks.filter { homeDisks.contains($0.device) }.flatMap(\.allVolumes)
+        case .disks, .disksHolding:
+            neighbours = snapshot.disks.filter { homeDisks.contains($0.device) }.flatMap(\.allVolumes)
         case .volumes: neighbours = []
         }
         let counted = Set(result.stillMounted.map(\.device))
@@ -694,9 +759,12 @@ public final class Engine {
 
     /// Climbs the retry ladder for one volume. Pure function of its inputs
     /// apart from the unmount itself, so it can run on any thread.
+    ///
+    /// - Parameter knownHolders: holders found some other way than lsof, such
+    ///   as a running Time Machine backup, named when the unmount is refused.
     private static func unmountWithRetries(_ volume: Volume, ops: DiskOperating,
                                            ladder: [TimeInterval], deadline: Date?,
-                                           force: Bool,
+                                           force: Bool, knownHolders: [String] = [],
                                            progress: (String) -> Void) -> VolumeParkResult {
         var success = false
         var blockers: [String] = []
@@ -733,7 +801,7 @@ public final class Engine {
             if result.success { success = true; break }
             refusal = result.detail
             if let mountPoint = volume.mountPoint {
-                let found = ops.blockers(mountPoint: mountPoint)
+                let found = knownHolders + ops.blockers(mountPoint: mountPoint)
                 if !found.isEmpty {
                     blockers = found
                     progress("\(volume.displayName) blocked by " + found.joined(separator: ", "))
@@ -780,11 +848,18 @@ public final class Engine {
                                 failure: "Could not read the disks, so nothing was mounted: \(error)")
         }
         timing.discover = Date().timeIntervalSince(started)
+        guard let scope = Self.resolve(scope, in: before) else {
+            return MountOutcome(results: [], total: 0, mountedCount: 0,
+                                failure: "That drive is not on a fresh read; it may have been unplugged. Nothing was mounted.")
+        }
 
         let disks: [PhysicalDisk]
         let inScope: (Volume) -> Bool
         var asked = 0
         switch scope {
+        case .disksHolding:
+            return MountOutcome(results: [], total: 0, mountedCount: 0,
+                                failure: "That drive could not be found. Nothing was mounted.")
         case .everything:
             disks = before.disks
             inScope = { _ in true }

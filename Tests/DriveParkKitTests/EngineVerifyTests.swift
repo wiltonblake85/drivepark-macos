@@ -333,6 +333,61 @@ final class EngineVerifyTests: XCTestCase {
         XCTAssertEqual(ops.events, [])
     }
 
+    // MARK: - Per-drive buttons find the drive as it is now
+
+    private func renumberedPlex(mounted: Bool) -> DiskSnapshot {
+        var plex = Tower.bays[1]
+        plex.disk = "disk27"
+        plex.container = "disk28"
+        plex.volume = "disk28s1"
+        return Tower.snapshot(mounted: mounted ? [Tower.plex] : [],
+                              bays: [Tower.bays[0], plex, Tower.bays[2]])
+    }
+
+    func testDriveParkFindsARenumberedDriveByItsVolumes() {
+        // The menu saw Plex on disk23. By the click it is disk27, and disk23
+        // is gone. A park by the old name would refuse, or worse, find a
+        // different bay under it.
+        let discovery = FakeDiscovery([.success(renumberedPlex(mounted: true)),
+                                       .success(renumberedPlex(mounted: false))])
+        let ops = FakeOps()
+        let outcome = engine(discovery, ops).park(drivesHolding: [Tower.plex])
+
+        XCTAssertTrue(outcome.parked)
+        XCTAssertEqual(ops.events.filter { $0.hasPrefix("unmount") }, ["unmount disk28s1"])
+        XCTAssertTrue(ops.events.contains("eject disk27"))
+    }
+
+    func testDriveParkOfADriveNoLongerAttachedTouchesNothing() {
+        let withoutPlex = Tower.bays.filter { $0.uuid != Tower.plex }
+        let discovery = FakeDiscovery([.success(Tower.snapshot(mounted: Tower.all, bays: withoutPlex))])
+        let ops = FakeOps()
+        let outcome = engine(discovery, ops).park(drivesHolding: [Tower.plex])
+        XCTAssertNotNil(outcome.failure)
+        XCTAssertEqual(ops.events, [])
+    }
+
+    func testDriveMountFindsARenumberedDrive() {
+        let discovery = FakeDiscovery([.success(renumberedPlex(mounted: false)),
+                                       .success(renumberedPlex(mounted: true))])
+        let ops = FakeOps()
+        let outcome = engine(discovery, ops).mount(drivesHolding: [Tower.plex])
+        XCTAssertEqual(ops.events.filter { $0.hasPrefix("mount") }, ["mount disk28s1"])
+        XCTAssertEqual(outcome.mountedCount, 1)
+    }
+
+    func testVolumeWithNoUUIDIsSaidOutLoud() {
+        var stick = PhysicalDisk(device: "disk20")
+        stick.directVolumes = [Volume(device: "disk20", name: "STICK", mountPoint: "/Volumes/STICK", uuid: nil)]
+        var parked = stick
+        parked.directVolumes = [Volume(device: "disk20", name: "STICK", mountPoint: nil, uuid: nil)]
+        let discovery = FakeDiscovery([.success(DiskSnapshot(disks: [stick])),
+                                       .success(DiskSnapshot(disks: [parked]))])
+        let outcome = engine(discovery, FakeOps()).park()
+        XCTAssertTrue(outcome.parked)
+        XCTAssertTrue(outcome.notes.contains { $0.contains("STICK: has no volume UUID") })
+    }
+
     // MARK: - Mount on wake undoes only what was named
 
     func testWakeMountTouchesOnlyTheVolumesItWasGiven() {

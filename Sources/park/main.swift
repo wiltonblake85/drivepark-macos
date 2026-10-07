@@ -50,8 +50,8 @@ func printStatus() {
     var total = 0
     print("PARK STATUS — \(disks.count) external disk(s)")
     if !Preferences.appLooksAlive { print(appLivenessLine()) }
-    if let holder = VetoBroker.holder {
-        print("Remount veto held by \(holder.name) (pid \(holder.pid)), \(holder.uuids.count) volume(s).")
+    for holder in VetoBroker.holders {
+        print("Remount veto held by \(printable(holder.name)) (pid \(holder.pid)), \(holder.uuids.count) volume(s).")
         print(holder.canAnswer
               ? "`park mount` will ask it to let go."
               : "Press Ctrl-C in that process to drop it.")
@@ -303,7 +303,16 @@ case "mount":
     // app holds one produces the app's own dissent string and no remount,
     // which is what this command used to do (SPEC section 10, 2026-09-03,
     // when it was still named `park release`).
-    if let holder = VetoBroker.holder {
+    let holders = VetoBroker.holders
+    // A `park now --hold` in another terminal holds a real veto and listens
+    // for nothing, so asking the app to let go would leave that one standing.
+    // With a record per holder, both can be seen at once.
+    if let terminal = holders.first(where: { !$0.canAnswer }) {
+        print("\(printable(terminal.name)) (pid \(terminal.pid)) is holding a remount veto and cannot be asked.")
+        print("Press Ctrl-C in that terminal, then run `park mount` again.")
+        exit(1)
+    }
+    if let holder = holders.first {
         if holder.canAnswer {
             print("DrivePark (pid \(holder.pid)) is holding the remount veto. Asking it to mount.")
             let nonce = VetoBroker.requestMount(disks: mountOnly)

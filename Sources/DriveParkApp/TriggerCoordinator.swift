@@ -59,13 +59,51 @@ final class TriggerCoordinator {
         distributedObservers.append(distributed.addObserver(
             forName: Notification.Name("com.apple.screenIsLocked"),
             object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.fire(.screenLock) }
+                MainActor.assumeIsolated {
+                    self?.whenSession(isLocked: true, notice: "a screen lock notice") {
+                        self?.fire(.screenLock)
+                    }
+                }
             })
         distributedObservers.append(distributed.addObserver(
             forName: Notification.Name("com.apple.screenIsUnlocked"),
             object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.handleWake(reason: "the screen unlocked") }
+                MainActor.assumeIsolated {
+                    self?.whenSession(isLocked: false, notice: "a screen unlock notice") {
+                        self?.handleWake(reason: "the screen unlocked")
+                    }
+                }
             })
+    }
+
+    /// Whether this login session's screen is locked, as the window server
+    /// sees it, or nil when that cannot be read.
+    static func sessionScreenIsLocked() -> Bool? {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return nil }
+        return session["CGSSessionScreenIsLocked"] as? Bool ?? false
+    }
+
+    /// Acts on a lock or unlock notice only when the session agrees.
+    ///
+    /// The notices are distributed notifications, and any process can post
+    /// one (audit, Low). This session's own tests did exactly that on
+    /// 2026-10-06 to drive a park and a wake without locking the screen. So
+    /// the window server is asked as well, four times over a second and a
+    /// half in case the notice lands before the session state turns. When the
+    /// session cannot be read at all, the notice is trusted as it always was,
+    /// rather than leaving a real screen lock unanswered.
+    private func whenSession(isLocked expected: Bool, notice: String,
+                             _ action: @escaping () -> Void) {
+        Task { @MainActor in
+            for attempt in 0..<4 {
+                guard let locked = Self.sessionScreenIsLocked() else { return action() }
+                if locked == expected { return action() }
+                if attempt < 3 { try? await Task.sleep(nanoseconds: 500_000_000) }
+            }
+            Preferences.recordDiagnostic(
+                "screenLock",
+                "\(notice) arrived but the screen is \(expected ? "not locked" : "still locked"); ignored")
+        }
     }
 
     private func observe(_ center: NotificationCenter, _ name: Notification.Name,

@@ -396,8 +396,28 @@ func assembleDisks(physicalList: [String: Any],
         let mountPoint = entry["MountPoint"] as? String
         guard name != nil || mountPoint != nil else { return nil }
         guard !isProtectedMountPoint(mountPoint) else { return nil }
+        var uuid = entry["VolumeUUID"] as? String
+        // `diskutil list` leaves the UUID out for some volumes that have one.
+        // Captured 2026-10-06: a partitionless exFAT stick had none in the
+        // list, while `diskutil info` and Disk Arbitration both gave
+        // E984B669-8189-3EB0-B59C-324AF2494103. Without it the volume could be
+        // parked but never held parked, because the veto matches on UUID. One
+        // extra call, only for the volumes that need it.
+        if uuid == nil {
+            switch info(device) {
+            case .plist(let details):
+                uuid = details["VolumeUUID"] as? String
+            case .failed(let reason, let stalled):
+                // A stall is a stall wherever it happens. Any other refusal
+                // only means this volume has no UUID to give.
+                if stalled {
+                    result.timedOut = true
+                    result.problems.append(reason)
+                }
+            }
+        }
         return Volume(device: device, name: name ?? "(unnamed)", mountPoint: mountPoint,
-                      uuid: (entry["VolumeUUID"] as? String)?.lowercased())
+                      uuid: uuid?.lowercased())
     }
 
     for entry in allEntries {

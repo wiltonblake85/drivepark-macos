@@ -19,6 +19,7 @@ final class FakeDiscovery: DiskDiscovering {
     private let reads: [Result<DiskSnapshot, Error>]
     private var count = 0
     var images: [AttachedImage]? = []
+    var timeMachineState: TimeMachineState? = TimeMachineState()
 
     init(_ reads: [Result<DiskSnapshot, Error>]) {
         self.reads = reads
@@ -38,6 +39,8 @@ final class FakeDiscovery: DiskDiscovering {
     }
 
     func attachedImages() -> [AttachedImage]? { images }
+
+    func timeMachine() -> TimeMachineState? { timeMachineState }
 }
 
 /// Records every operation in order. Succeeds unless told otherwise.

@@ -284,7 +284,14 @@ final class AppState: ObservableObject {
             // A volume put on the ignore list from the CLI is no longer this
             // app's to hold down either.
             engine.liftVetoForIgnored()
-            await MainActor.run { [weak self] in
+            // Off the main thread: with the sleep trigger armed this runs
+            // pmset, which can take five seconds, and the menu used to freeze
+            // for it around every sleep and wake.
+            var warnings: [ParkTrigger: String] = [:]
+            for status in TriggerHealth.armedButDead() {
+                warnings[status.trigger] = status.reason
+            }
+            await MainActor.run { [weak self, warnings] in
                 guard let self else { return }
                 self.apply(read)
                 // Heartbeat. Every trigger in this app depends on the app
@@ -292,10 +299,6 @@ final class AppState: ObservableObject {
                 // was. Absence is the one failure it could not report.
                 Preferences.recordHeartbeat()
                 self.refreshing = false
-                var warnings: [ParkTrigger: String] = [:]
-                for status in TriggerHealth.armedButDead() {
-                    warnings[status.trigger] = status.reason
-                }
                 self.triggerWarnings = warnings
                 self.transomFailure = Transom.lastFailure
                 if self.enclosureStalled, self.message.isEmpty || self.message.hasPrefix("Enclosure") {
@@ -440,6 +443,35 @@ final class AppState: ObservableObject {
         // Parked by hand now, so not the next wake's to undo.
         forgetTriggerParks(onDisks: only)
         runPark(only: only, deadline: nil, label: label, completion: nil)
+    }
+
+    /// The volume UUIDs that name a drive in the menu, or nil when one of its
+    /// volumes has none, in which case the disk name from the last refresh
+    /// is all there is to go on.
+    private func identity(of drive: PhysicalDisk) -> Set<String>? {
+        let uuids = drive.allVolumes.compactMap { $0.uuid?.lowercased() }
+        guard !uuids.isEmpty, uuids.count == drive.allVolumes.count else { return nil }
+        return Set(uuids)
+    }
+
+    /// A drive from the menu, found by its volumes when the park runs rather
+    /// than by a disk number up to 30 s old.
+    func park(drive: PhysicalDisk, label: String) {
+        guard let uuids = identity(of: drive) else {
+            return park(only: [drive.device], label: label)
+        }
+        forgetTriggerParks(volumes: uuids)
+        runPark(only: nil, drive: uuids, deadline: nil, label: label, completion: nil)
+    }
+
+    func mount(drive: PhysicalDisk, label: String) {
+        guard let uuids = identity(of: drive) else {
+            mount(only: [drive.device], label: label)
+            return
+        }
+        guard startMount(subject: label, logAs: label,
+                         work: { $0.mount(drivesHolding: uuids) }) else { return }
+        forgetTriggerParks(volumes: uuids)
     }
 
     /// A mount asked for by hand.
@@ -619,7 +651,11 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func runPark(only: Set<String>?, deadline: Date?, label: String?,
+    /// - Parameter drive: volume UUIDs naming one drive, found on a fresh
+    ///   read when the park runs. Takes the place of `only` for the menu's
+    ///   per-drive buttons.
+    private func runPark(only: Set<String>?, drive: Set<String>? = nil,
+                         deadline: Date?, label: String?,
                          triggerLabel: String? = nil,
                          completion: ((ParkOutcome?) -> Void)?) {
         guard !busy else {
@@ -636,9 +672,11 @@ final class AppState: ObservableObject {
         startTicking()
         let engine = self.engine
         Task.detached {
-            let outcome = engine.park(onlyDisks: only, deadline: deadline) { line in
+            let report: (String) -> Void = { line in
                 Task { @MainActor in self.workingOn = line }
             }
+            let outcome = drive.map { engine.park(drivesHolding: $0, progress: report) }
+                ?? engine.park(onlyDisks: only, deadline: deadline, progress: report)
             Self.record(outcome, trigger: triggerLabel ?? label ?? "manual")
             let read = Self.read(after: outcome, engine: engine)
             await MainActor.run { [weak self] in
@@ -646,7 +684,8 @@ final class AppState: ObservableObject {
                 // failure you did not watch happen is not a mandate to do
                 // something destructive later.
                 self?.finish(outcome, read: read, label: label, trigger: triggerLabel,
-                             scoped: only != nil, offersForce: triggerLabel == nil)
+                             scoped: only != nil || drive != nil,
+                             offersForce: triggerLabel == nil)
             }
             completion?(outcome)
         }
@@ -868,14 +907,24 @@ final class AppState: ObservableObject {
     func setTrigger(_ trigger: ParkTrigger, _ on: Bool) {
         Preferences.setEnabled(trigger, on)
         enabledTriggers = Preferences.enabledTriggers
-        let status = TriggerHealth.status(for: trigger)
-        if on, !status.canFire, let reason = status.reason {
-            // Say it at the moment they switch it on, not only in a submenu
-            // they may never open again.
-            message = reason
-            triggerWarnings[trigger] = reason
-        } else {
+        guard on else {
             triggerWarnings[trigger] = nil
+            return
+        }
+        // Checked off the main thread for the same reason as the refresh.
+        Task.detached {
+            let status = TriggerHealth.status(for: trigger)
+            await MainActor.run { [weak self] in
+                guard let self, Preferences.isEnabled(trigger) else { return }
+                if !status.canFire, let reason = status.reason {
+                    // Say it at the moment they switch it on, not only in a
+                    // submenu they may never open again.
+                    self.message = reason
+                    self.triggerWarnings[trigger] = reason
+                } else {
+                    self.triggerWarnings[trigger] = nil
+                }
+            }
         }
     }
 
@@ -1083,9 +1132,9 @@ struct MenuContent: View {
             } else {
                 Button(mountedHere ? "Park \(label)" : "Mount \(label)") {
                     if mountedHere {
-                        state.park(only: [disk.device], label: label)
+                        state.park(drive: disk, label: label)
                     } else {
-                        state.mount(only: [disk.device], label: label)
+                        state.mount(drive: disk, label: label)
                     }
                 }
                 .disabled(state.busy)

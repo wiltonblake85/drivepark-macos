@@ -32,12 +32,16 @@ public protocol DiskDiscovering {
     func discover() throws -> DiskSnapshot
     /// Attached disk images, or nil when hdiutil did not answer.
     func attachedImages() -> [AttachedImage]?
+    /// Time Machine's destinations and whether a backup is running, or nil
+    /// when tmutil did not answer.
+    func timeMachine() -> TimeMachineState?
 }
 
 public struct SystemDiscovery: DiskDiscovering {
     public init() {}
     public func discover() throws -> DiskSnapshot { try discoverExternalDisks() }
     public func attachedImages() -> [AttachedImage]? { readAttachedImages() }
+    public func timeMachine() -> TimeMachineState? { readTimeMachine() }
 }
 
 /// Everything Engine does to the disks.
