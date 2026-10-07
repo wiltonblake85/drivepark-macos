@@ -7,7 +7,9 @@
 //   displays off   NSWorkspace screensDidSleep.
 //   screen lock    a distributed notification. Undocumented by Apple but
 //                  stable for years; if it ever stops firing the other two
-//                  triggers are unaffected.
+//                  triggers are unaffected. Any process can post it, so it
+//                  only counts once the login session says the screen is
+//                  locked (ScreenLock).
 //
 // Auto-mount only ever undoes an auto-park, volume by volume. A drive the user
 // parked by hand stays parked through a wake cycle, because they had a reason.
@@ -59,13 +61,38 @@ final class TriggerCoordinator {
         distributedObservers.append(distributed.addObserver(
             forName: Notification.Name("com.apple.screenIsLocked"),
             object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.fire(.screenLock) }
+                MainActor.assumeIsolated {
+                    self?.confirm(locked: true) { $0.fire(.screenLock) }
+                }
             })
         distributedObservers.append(distributed.addObserver(
             forName: Notification.Name("com.apple.screenIsUnlocked"),
             object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.handleWake(reason: "the screen unlocked") }
+                MainActor.assumeIsolated {
+                    self?.confirm(locked: false) { $0.handleWake(reason: "the screen unlocked") }
+                }
             })
+    }
+
+    /// Acts on a lock or unlock notice only once the login session agrees.
+    /// A post from some other process with the screen in the other state is
+    /// recorded and dropped: no park, no mount.
+    private func confirm(locked: Bool, attempt: Int = 0,
+                         then action: @escaping (TriggerCoordinator) -> Void) {
+        if ScreenLock.isLockedNow == locked {
+            action(self)
+            return
+        }
+        let times = ScreenLock.checkTimes
+        guard attempt + 1 < times.count else {
+            Preferences.recordDiagnostic(
+                "screenLock", "\(locked ? "lock" : "unlock") notice at \(Date()), but the session said "
+                    + "\(locked ? "unlocked" : "locked") for \(times.last ?? 0)s: ignored")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + times[attempt + 1] - times[attempt]) { [weak self] in
+            MainActor.assumeIsolated { self?.confirm(locked: locked, attempt: attempt + 1, then: action) }
+        }
     }
 
     private func observe(_ center: NotificationCenter, _ name: Notification.Name,

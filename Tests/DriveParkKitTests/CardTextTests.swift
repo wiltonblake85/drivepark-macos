@@ -35,3 +35,14 @@ final class CardTextTests: XCTestCase {
         XCTAssertEqual(outcome.cardProblem, "Time Machine is backing up to Backup.")
     }
 }
+
+final class ScreenLockTests: XCTestCase {
+    /// The two shapes read on the tower: no key while unlocked, true while
+    /// locked. Anything else is not a lock.
+    func testOnlyTheSessionRecordCountsAsLocked() {
+        XCTAssertTrue(ScreenLock.isLocked(session: ["CGSSessionScreenIsLocked": true]))
+        XCTAssertFalse(ScreenLock.isLocked(session: ["kCGSSessionOnConsoleKey": true]))
+        XCTAssertFalse(ScreenLock.isLocked(session: ["CGSSessionScreenIsLocked": false]))
+        XCTAssertFalse(ScreenLock.isLocked(session: nil))
+    }
+}
