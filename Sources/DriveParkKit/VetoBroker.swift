@@ -26,6 +26,33 @@
 
 import Foundation
 
+/// One process, told apart from any later process that reuses its pid.
+struct ProcessIdentity: Equatable {
+    /// When the process started, seconds since 1970 to the microsecond.
+    let start: Double
+    /// The kernel's short name for it (p_comm, at most MAXCOMLEN bytes).
+    let name: String
+
+    /// Read from the kernel with sysctl, which answers for any process,
+    /// including root's, where kill(pid, 0) only says EPERM. nil when no
+    /// process has this pid.
+    static func of(_ pid: pid_t) -> ProcessIdentity? {
+        guard pid > 0 else { return nil }
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0,
+              size >= MemoryLayout<kinfo_proc>.size,
+              info.kp_proc.p_pid == pid else { return nil }
+        let started = info.kp_proc.p_un.__p_starttime
+        let name = withUnsafeBytes(of: info.kp_proc.p_comm) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        return ProcessIdentity(start: Double(started.tv_sec) + Double(started.tv_usec) / 1_000_000,
+                               name: name)
+    }
+}
+
 public enum VetoBroker {
     /// Doorbell. Carries no payload, because the payload is in the store and a
     /// notification that arrives twice must not mean two mounts.
@@ -35,6 +62,7 @@ public enum VetoBroker {
     private static let holderPIDKey = "vetoHolderPID"
     private static let holderNameKey = "vetoHolderName"
     private static let holderUUIDsKey = "vetoHolderUUIDs"
+    private static let holderStartKey = "vetoHolderStart"
     // Transient handshake keys: written, answered, and consumed inside a
     // minute, so renaming them (2026-09-07) needed no migration. The app and
     // the CLI ship from one package, so they never disagree on these names.
@@ -57,9 +85,15 @@ public enum VetoBroker {
     /// Called on every change to the veto set, including the change to empty.
     public static func publishHold(_ uuids: Set<String>) {
         guard !uuids.isEmpty else { return clearHold() }
-        store.set(Int(ProcessInfo.processInfo.processIdentifier), forKey: holderPIDKey)
+        let pid = ProcessInfo.processInfo.processIdentifier
+        store.set(Int(pid), forKey: holderPIDKey)
         store.set(ProcessInfo.processInfo.processName, forKey: holderNameKey)
         store.set(Array(uuids), forKey: holderUUIDsKey)
+        if let start = ProcessIdentity.of(pid)?.start {
+            store.set(start, forKey: holderStartKey)
+        } else {
+            store.removeObject(forKey: holderStartKey)
+        }
     }
 
     /// Clears the record only when this process wrote it.
@@ -78,6 +112,7 @@ public enum VetoBroker {
         store.removeObject(forKey: holderPIDKey)
         store.removeObject(forKey: holderNameKey)
         store.removeObject(forKey: holderUUIDsKey)
+        store.removeObject(forKey: holderStartKey)
     }
 
     /// nil when nobody holds a veto, or when the recorded holder is gone.
@@ -89,13 +124,37 @@ public enum VetoBroker {
     public static var holder: Holder? {
         let pid = pid_t(store.integer(forKey: holderPIDKey))
         guard pid > 0 else { return nil }
-        guard kill(pid, 0) == 0 || errno == EPERM else {
+        let name = store.string(forKey: holderNameKey) ?? "unknown"
+        let start = store.object(forKey: holderStartKey) as? Double
+        guard holderIsAlive(pid: pid, recordedStart: start, recordedName: name,
+                            lookup: ProcessIdentity.of) else {
             sweepHold()
             return nil
         }
-        let name = store.string(forKey: holderNameKey) ?? "unknown"
         let uuids = Set(store.stringArray(forKey: holderUUIDsKey) ?? [])
         return Holder(pid: pid, name: name, uuids: uuids)
+    }
+
+    /// Whether the process a holder record names is the one that wrote it.
+    ///
+    /// This used to be `kill(pid, 0)`, which answers a different question:
+    /// is there any process with this number. pids are reused, so after a
+    /// crash the record could name whatever started next, and a root-owned
+    /// process answers EPERM, which was read as alive. Either way the stale
+    /// veto never cleared and `park mount` waited on a holder that was gone
+    /// (audit, Medium). A pid and its start time together name one process
+    /// for the life of the machine.
+    ///
+    /// A record written before 2026-10-07 has no start time. For those the
+    /// kernel's name for the process stands in: weaker, but a reused pid is
+    /// rarely another DrivePark or another park.
+    static func holderIsAlive(pid: pid_t, recordedStart: Double?, recordedName: String,
+                              lookup: (pid_t) -> ProcessIdentity?) -> Bool {
+        guard let running = lookup(pid) else { return false }
+        if let recordedStart {
+            return abs(running.start - recordedStart) < 0.000_5
+        }
+        return running.name == String(recordedName.prefix(Int(MAXCOMLEN)))
     }
 
     // MARK: - Asking the holder to mount
