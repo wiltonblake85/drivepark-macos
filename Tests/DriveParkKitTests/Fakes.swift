@@ -94,6 +94,27 @@ final class FakeOps: DiskOperating {
     }
 }
 
+/// Time Machine, idle unless told otherwise. Counts how often it is asked.
+final class FakeBackups: BackupReading {
+    private let lock = NSLock()
+    private var asked = 0
+    var status: BackupStatus? = BackupStatus(running: false)
+    /// Devices that carry the APFS Backup role.
+    var backupRole: Set<String> = []
+
+    var calls: Int {
+        lock.lock(); defer { lock.unlock() }
+        return asked
+    }
+
+    func backupStatus() -> BackupStatus? {
+        lock.lock(); asked += 1; lock.unlock()
+        return status
+    }
+
+    func isBackupDestination(_ volume: Volume) -> Bool { backupRole.contains(volume.device) }
+}
+
 /// The tower's three APFS bays as captured on 2026-10-06, each its own
 /// container, with the device names they had that day. Bottom Drawer's UUID
 /// is its real one; the other two stand in. Lowercased, the way discovery
@@ -136,6 +157,7 @@ enum Tower {
 }
 
 func engine(_ discovery: FakeDiscovery, _ ops: FakeOps,
+            backups: FakeBackups = FakeBackups(),
             ignored: @escaping (String?) -> Bool = { _ in false }) -> Engine {
-    Engine(discovery: discovery, ops: ops, isIgnored: ignored, retryDelays: [0])
+    Engine(discovery: discovery, ops: ops, backups: backups, isIgnored: ignored, retryDelays: [0])
 }

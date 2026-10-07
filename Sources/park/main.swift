@@ -238,7 +238,27 @@ case "now":
         print("FORCE: open files will be torn down and unwritten data in them is lost.")
         print("No retries, no waiting for the blocker to finish.\n")
     }
-    let outcome = engine.park(onlyDisks: onlyDisks, force: force) { print($0) }
+    var outcome = engine.park(onlyDisks: onlyDisks, force: force,
+                              backup: arguments.contains("--stop-backup")
+                                  ? .stopBackupIfRunning : .refuseWhileBackingUp) { print($0) }
+    // Time Machine is writing to a drive this park would unmount, and nothing
+    // has been touched. Ask at a terminal; anywhere else, nobody can answer,
+    // so the backup wins.
+    if !outcome.backupInProgress.isEmpty {
+        let names = outcome.backupInProgress.map(\.displayName).joined(separator: ", ")
+        print("Time Machine is backing up to \(names). Parking stops that backup.")
+        guard isatty(STDIN_FILENO) != 0 else {
+            print("NOT PARKED. Run again when the backup finishes, or add --stop-backup.")
+            exit(1)
+        }
+        Swift.print("Stop the backup and park? [y/N] ", terminator: "")
+        guard (readLine() ?? "").trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("y") else {
+            print("NOT PARKED. Left mounted while Time Machine finishes.")
+            exit(1)
+        }
+        outcome = engine.park(onlyDisks: onlyDisks, force: force,
+                              backup: .stopBackupIfRunning) { print($0) }
+    }
     for note in outcome.notes { print(note) }
     for result in outcome.results {
         let verdict = result.success ? "unmounted" : "FAILED"
@@ -510,7 +530,8 @@ case "ignored":
         for volume in ignored { print("  \(volume.displayName)  (\(volume.uuid ?? "?"))") }
     }
 default:
-    print("usage: park [status | now [--hold] [--force] [--only diskN] | mount [--only diskN]")
+    print("usage: park [status | now [--hold] [--force] [--stop-backup] [--only diskN]")
+    print("            | mount [--only diskN]")
     print("            | ignore <volume> | manage <volume> | ignored | triggers")
     print("            | transom [on|off|token]]")
     exit(64)

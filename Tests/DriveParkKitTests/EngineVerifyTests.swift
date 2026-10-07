@@ -313,7 +313,7 @@ final class EngineVerifyTests: XCTestCase {
                                        .success(Tower.snapshot())])
         let ops = FakeOps()
         var ignored: Set<String> = []
-        let engine = Engine(discovery: discovery, ops: ops,
+        let engine = Engine(discovery: discovery, ops: ops, backups: FakeBackups(),
                             isIgnored: { $0.map(ignored.contains) ?? false }, retryDelays: [0])
         XCTAssertTrue(engine.park().parked)
         XCTAssertTrue(ops.vetoedVolumeUUIDs.contains(Tower.backup))

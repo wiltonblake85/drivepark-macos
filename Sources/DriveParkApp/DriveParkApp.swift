@@ -666,6 +666,7 @@ final class AppState: ObservableObject {
 
     private func runPark(only: Set<String>?, deadline: Date?, label: String?,
                          triggerLabel: String? = nil,
+                         backup: BackupPolicy = .refuseWhileBackingUp,
                          completion: ((ParkOutcome?) -> Void)?) {
         guard !busy else {
             // Nothing was attempted. Report that, rather than an empty park
@@ -681,20 +682,43 @@ final class AppState: ObservableObject {
         startTicking()
         let engine = self.engine
         Task.detached {
-            let outcome = engine.park(onlyDisks: only, deadline: deadline) { line in
+            let outcome = engine.park(onlyDisks: only, deadline: deadline, backup: backup) { line in
                 Task { @MainActor in self.workingOn = line }
             }
             Self.record(outcome, trigger: triggerLabel ?? label ?? "manual")
             let read = Self.read(after: outcome, engine: engine)
             await MainActor.run { [weak self] in
+                guard let self else { return }
+                // A park a person asked for, refused because Time Machine is
+                // writing to one of the drives: ask them, rather than report
+                // a failure they can do nothing about. Nothing was touched.
+                if triggerLabel == nil, !outcome.backupInProgress.isEmpty {
+                    self.askAboutBackup(outcome, read: read, only: only, label: label)
+                    return
+                }
                 // Trigger-driven parks never leave a force offer behind. A
                 // failure you did not watch happen is not a mandate to do
                 // something destructive later.
-                self?.finish(outcome, read: read, label: label, trigger: triggerLabel,
-                             scoped: only != nil, offersForce: triggerLabel == nil)
+                self.finish(outcome, read: read, label: label, trigger: triggerLabel,
+                            scoped: only != nil, offersForce: triggerLabel == nil)
             }
             completion?(outcome)
         }
+    }
+
+    private func askAboutBackup(_ outcome: ParkOutcome, read: Result<DiskSnapshot, Error>,
+                                only: Set<String>?, label: String?) {
+        apply(read)
+        busy = false
+        stopTicking()
+        let names = outcome.backupInProgress.map(\.displayName)
+        guard BackupPrompt.confirm(volumes: names) else {
+            message = "Not parked. Time Machine is backing up to "
+                + names.joined(separator: ", ") + "; park again when it finishes."
+            return
+        }
+        runPark(only: only, deadline: nil, label: label,
+                backup: .stopBackupIfRunning, completion: nil)
     }
 
     /// The read the screen should show after a park: the park's own last

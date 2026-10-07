@@ -53,10 +53,16 @@ public struct ParkOutcome {
     /// What keeps the enclosure from being safe to power off, or nil when it
     /// is safe.
     public let safetyReason: String?
+    /// Set when this run touched nothing because Time Machine is backing up
+    /// to these volumes. A park a person asked for asks them about it and
+    /// runs again with `.stopBackupIfRunning`; an automatic one stops here.
+    public let backupInProgress: [Volume]
 
     init(results: [VolumeParkResult] = [], stillMounted: [Volume] = [], missing: [Volume] = [],
          notes: [String] = [], timing: ParkTiming = ParkTiming(), failure: String? = nil,
-         snapshot: DiskSnapshot? = nil, safetyReason: String? = nil) {
+         snapshot: DiskSnapshot? = nil, safetyReason: String? = nil,
+         backupInProgress: [Volume] = []) {
+        self.backupInProgress = backupInProgress
         self.results = results
         self.stillMounted = stillMounted
         self.missing = missing
@@ -165,6 +171,7 @@ public enum ForceCheck {
 public final class Engine {
     private let discovery: DiskDiscovering
     private let ops: DiskOperating?
+    private let backups: BackupReading
     private let isIgnored: (String?) -> Bool
     private let ladder: [TimeInterval]
     public static let retryDelays: [TimeInterval] = [0, 2, 5, 10]
@@ -180,11 +187,14 @@ public final class Engine {
 
     /// - Parameter isIgnored: the ignore list. Injected so a test never reads
     ///   or writes the preferences of the Mac it runs on.
+    /// - Parameter backups: Time Machine. Injected so a test never runs tmutil.
     public init(discovery: DiskDiscovering, ops: DiskOperating?,
+                backups: BackupReading = SystemBackups(),
                 isIgnored: @escaping (String?) -> Bool = Preferences.isIgnored,
                 retryDelays: [TimeInterval] = Engine.retryDelays) {
         self.discovery = discovery
         self.ops = ops
+        self.backups = backups
         self.isIgnored = isIgnored
         self.ladder = retryDelays
     }
@@ -229,12 +239,16 @@ public final class Engine {
     ///   force-unmounts a drive mid-write would be the worst thing this app
     ///   could do. It exists as a one-shot remedy a human asks for by name,
     ///   after a normal park has already failed and named the blocker.
+    /// - Parameter backup: what to do about a Time Machine backup running
+    ///   onto a volume this park would unmount. Refused unless a person was
+    ///   asked and said yes.
     public func park(onlyDisks: Set<String>? = nil,
                      deadline: Date? = nil,
                      force: Bool = false,
+                     backup: BackupPolicy = .refuseWhileBackingUp,
                      progress: (String) -> Void = { _ in }) -> ParkOutcome {
         run(scope: onlyDisks.map(Scope.disks) ?? .everything,
-            deadline: deadline, force: force, progress: progress)
+            deadline: deadline, force: force, backup: backup, progress: progress)
     }
 
     /// Who is holding these volumes right now, read fresh, for the force
@@ -259,6 +273,12 @@ public final class Engine {
         }
         let images = discovery.attachedImages() ?? []
         var blockers: Set<String> = []
+        // lsof cannot see backupd writing, and it is the holder a person most
+        // needs to hear about before forcing.
+        if case .backingUp(let busy) = backupCheck(toUnmount: mounted, status: backups.backupStatus(),
+                                                   isDestination: backups.isBackupDestination) {
+            for volume in busy { blockers.insert("Time Machine, backing up to \(volume.displayName)") }
+        }
         for volume in mounted {
             guard let mountPoint = volume.mountPoint else { continue }
             blockers.formUnion(ops.blockers(mountPoint: mountPoint))
@@ -281,8 +301,10 @@ public final class Engine {
     public func forceUnmount(volumeUUIDs: Set<String>,
                              progress: (String) -> Void = { _ in }) -> ParkOutcome {
         guard !volumeUUIDs.isEmpty else { return .refused("No volume was named. Nothing was forced.") }
+        // The force prompt named any backup in progress, so the person who
+        // confirmed it has already been asked.
         return run(scope: .volumes(Set(volumeUUIDs.map { $0.lowercased() })),
-                   deadline: nil, force: true, progress: progress)
+                   deadline: nil, force: true, backup: .stopBackupIfRunning, progress: progress)
     }
 
     /// The key a volume is tracked by across reads: its UUID, or its device
@@ -291,7 +313,7 @@ public final class Engine {
         volume.uuid ?? "device:\(volume.device)"
     }
 
-    private func run(scope: Scope, deadline: Date?, force: Bool,
+    private func run(scope: Scope, deadline: Date?, force: Bool, backup: BackupPolicy,
                      progress: (String) -> Void) -> ParkOutcome {
         guard let ops else {
             return .refused("Disk Arbitration session unavailable. Nothing was touched.")
@@ -355,6 +377,24 @@ public final class Engine {
             return ParkOutcome(stillMounted: systemVolumes, notes: notes, timing: timing,
                                snapshot: before,
                                safetyReason: before.verdict.reason(isIgnored: isIgnored))
+        }
+
+        // Asked before anything is touched, the veto included.
+        switch backupCheck(toUnmount: toUnmount, status: backups.backupStatus(),
+                           isDestination: backups.isBackupDestination) {
+        case .clear(let note):
+            if let note { notes.append(note) }
+        case .backingUp(let busy):
+            let names = busy.map(\.displayName).joined(separator: ", ")
+            guard case .stopBackupIfRunning = backup else {
+                timing.total = Date().timeIntervalSince(started)
+                return ParkOutcome(notes: notes, timing: timing,
+                                   failure: "Time Machine is backing up to \(names). Parking would stop "
+                                       + "the backup, so nothing was parked.",
+                                   backupInProgress: busy)
+            }
+            notes.append("Time Machine was backing up to \(names). Parked anyway, as asked; "
+                         + "that backup stops and picks up again on the next one.")
         }
 
         // The veto goes up before the first unmount, not after the last
