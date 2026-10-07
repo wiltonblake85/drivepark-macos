@@ -799,8 +799,10 @@ final class AppState: ObservableObject {
         if !outcome.parked {
             let body = outcome.problem ?? "The park did not verify."
             Notifier.shared.post(title: "Park failed", body: body)
+            // The card names drives, not the programs holding them (audit,
+            // Low): `body` carries pids and paths, and stays on this Mac.
             Transom.post(title: "Park failed, do not undock",
-                         message: body,
+                         message: outcome.cardProblem,
                          symbol: "externaldrive.trianglebadge.exclamationmark",
                          persistent: true,
                          urgent: true)
@@ -851,7 +853,8 @@ final class AppState: ObservableObject {
                 body: "Not safe to unplug yet: \(reason).")
             Transom.post(
                 title: names.isEmpty ? "Parked" : "\(names) parked",
-                message: "Not safe to undock yet: \(reason).",
+                message: "Not safe to undock yet: \(outcome.cardSafetyReason).",
+                linkTitle: "Drive parked, not safe to undock yet",
                 symbol: "externaldrive",
                 duration: 10,
                 urgent: true)
@@ -864,7 +867,7 @@ final class AppState: ObservableObject {
             // six seconds is how a mounted drive gets yanked.
             Transom.post(
                 title: "Parked, but do NOT undock",
-                message: "\(reason). Verified in \(seconds).",
+                message: "\(outcome.cardSafetyReason). Verified in \(seconds).",
                 symbol: "exclamationmark.triangle.fill",
                 persistent: true,
                 urgent: true)
@@ -1078,23 +1081,38 @@ final class AppState: ObservableObject {
                             + "Copy the token from Transom → Advanced → Local API instead."
                         return
                     }
-                    Preferences.transomToken = found
+                    guard Preferences.saveTransomToken(found) else {
+                        self.message = "The Keychain would not store the token. Nothing was saved."
+                        return
+                    }
                     Transom.forgetCachedToken()
+                    self.turnOnTransomForToken()
                     self.testTransom()
                 }
             }
             return
         }
-        Preferences.transomToken = answer
+        guard Preferences.saveTransomToken(answer) else {
+            message = "The Keychain would not store the token. Nothing was saved."
+            return
+        }
         Transom.forgetCachedToken()
         guard answer != nil else {
             transomFailure = nil
             message = "Transom token cleared."
             return
         }
+        turnOnTransomForToken()
         // Prove it before saying it works. A saved token that 401s is a
         // channel that looks configured and delivers nothing.
         testTransom()
+    }
+
+    /// Pasting a token is asking for cards, and they are off by default now.
+    private func turnOnTransomForToken() {
+        guard !Preferences.transomEnabled else { return }
+        Preferences.transomEnabled = true
+        transomEnabled = true
     }
 
     /// Posts a real card rather than reporting on configuration. A channel

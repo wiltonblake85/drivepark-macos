@@ -9,10 +9,16 @@
 // Transom runs on this Mac and takes a card in one POST. Same three sentences
 // the notifier already writes, landing somewhere they are actually read.
 //
-// Local by construction: Transom binds 127.0.0.1 only, the token lives in the
-// Keychain, and nothing in this file can reach the network. A missing Transom
-// is not an error condition for DrivePark: no card is ever allowed to slow a
-// park down, fail one, or change what a park reports.
+// Local by construction: Transom binds 127.0.0.1 only, the token lives in
+// DrivePark's Keychain item, and nothing in this file can reach the network. A
+// missing Transom is not an error condition for DrivePark: no card is ever
+// allowed to slow a park down, fail one, or change what a park reports.
+//
+// Off unless switched on, and a card carries only what it needs to (audit,
+// Low, 2026-10-07). Through the token door: whether to undock, and which
+// drives. Never which programs held them, their pids, or any path. Through
+// the transom:// door, which any app can register for: a title with no names
+// at all, and no message.
 
 import Foundation
 import Security
@@ -64,15 +70,14 @@ public enum Transom {
 
     // MARK: - The token
 
-    /// Three sources, most explicit first. The environment is for scripts, the
-    /// preference is the paste-it-in escape hatch, and the Keychain is the
-    /// path that needs no setup at all.
+    /// Two sources, most explicit first. The environment is for scripts; the
+    /// token a person pasted in lives in DrivePark's own Keychain item.
     ///
-    /// The Keychain is NOT on this path. A cross-app Keychain read puts a modal
-    /// password prompt on screen, and a park that stops to ask for a password is
-    /// worse than a park with no card. `keychainToken()` is offered from the
-    /// explicit "read it from the Keychain" action instead, where a human is
-    /// already waiting on a dialog.
+    /// Transom's Keychain item is NOT on this path. A cross-app Keychain read
+    /// puts a modal password prompt on screen, and a park that stops to ask
+    /// for a password is worse than a park with no card. `keychainToken()` is
+    /// offered from the explicit "read it from the Keychain" action instead,
+    /// where a human is already waiting on a dialog.
     public static func resolveToken() -> String? {
         lock.lock()
         if let cachedToken { lock.unlock(); return cachedToken }
@@ -83,7 +88,7 @@ public enum Transom {
             return cache(environment, source: "environment")
         }
         if let stored = Preferences.transomToken {
-            return cache(stored, source: "preferences")
+            return cache(stored, source: "keychain")
         }
         Preferences.recordDiagnostic("transomTokenSource", "none found")
         return nil
@@ -148,15 +153,19 @@ public enum Transom {
     // MARK: - Posting
 
     /// Fire and forget. Returns immediately; the park never waits on a card.
+    ///
+    /// - Parameter linkTitle: what the transom:// door shows instead of
+    ///   `title`, for a title that names a drive. That door sends no message.
     public static func post(title: String,
                             message: String? = nil,
+                            linkTitle: String? = nil,
                             symbol: String,
                             persistent: Bool = false,
                             duration: Int? = nil,
                             urgent: Bool = false) {
         guard Preferences.transomEnabled else { return }
         queue.async {
-            _ = send(title: title, message: message, symbol: symbol,
+            _ = send(title: title, message: message, linkTitle: linkTitle, symbol: symbol,
                      persistent: persistent, duration: duration, urgent: urgent)
         }
     }
@@ -165,17 +174,19 @@ public enum Transom {
     @discardableResult
     public static func postAndWait(title: String,
                                    message: String? = nil,
+                                   linkTitle: String? = nil,
                                    symbol: String,
                                    persistent: Bool = false,
                                    duration: Int? = nil,
                                    urgent: Bool = false) -> Bool {
         guard Preferences.transomEnabled else { return false }
-        return send(title: title, message: message, symbol: symbol,
+        return send(title: title, message: message, linkTitle: linkTitle, symbol: symbol,
                     persistent: persistent, duration: duration, urgent: urgent)
     }
 
     private static func send(title: String,
                              message: String?,
+                             linkTitle: String?,
                              symbol: String,
                              persistent: Bool,
                              duration: Int?,
@@ -193,7 +204,7 @@ public enum Transom {
                 record("Posted by link, so a Focus will hold this. "
                        + "Set the Transom token to let do-not-undock cards through.")
             }
-            return openViaURLScheme(title: title, message: message, symbol: symbol,
+            return openViaURLScheme(title: linkTitle ?? title, symbol: symbol,
                                     persistent: persistent, duration: duration)
         }
 
@@ -256,13 +267,15 @@ public enum Transom {
     /// Used only when no token is configured. It can also launch Transom if it
     /// is not running, which is the correct outcome for a card that says do
     /// not unplug, and is why nothing here treats a closed Transom as an error.
+    ///
+    /// Any app can register for transom://, and whichever one macOS picks gets
+    /// the whole URL. So this door carries the title alone, written by the
+    /// caller to name no drive, and no message.
     private static func openViaURLScheme(title: String,
-                                         message: String?,
                                          symbol: String,
                                          persistent: Bool,
                                          duration: Int?) -> Bool {
         var pairs = ["title=" + encoded(title), "symbol=" + encoded(symbol)]
-        if let message { pairs.append("message=" + encoded(message)) }
         if persistent { pairs.append("persistent=true") }
         if let duration { pairs.append("duration=\(duration)") }
         let url = "transom://post?" + pairs.joined(separator: "&")
@@ -302,7 +315,7 @@ public enum Transom {
         if !Preferences.transomEnabled { return "Notch cards: off" }
         if let failure = lastFailure { return "⚠︎ \(failure)" }
         switch lastChannel {
-        case "link": return "Notch cards: on, by link. A Focus will hold them; set a token to change that."
+        case "link": return "Notch cards: on, by link, so they name no drive and a Focus holds them. Set a token for both."
         case "api": return "Notch cards: on, confirmed by Transom. Warnings pierce a Focus."
         default: return "Notch cards: on"
         }

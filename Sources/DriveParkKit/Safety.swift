@@ -106,6 +106,21 @@ public struct PowerOffVerdict {
         parts.append(contentsOf: unaccountedMounts.map(\.sentence))
         return parts.joined(separator: "; ")
     }
+
+    /// The same answer for a notch card: drive names, never a mount point,
+    /// device or path. The card says what not to unplug; the menu and the CLI
+    /// carry the rest.
+    public var cardReason: String? {
+        guard !safeToPowerOff else { return nil }
+        var parts: [String] = []
+        if !mountedVolumes.isEmpty {
+            parts.append(mountedVolumes.map(\.displayName).joined(separator: ", ") + " still mounted")
+        }
+        if !unaccountedMounts.isEmpty {
+            parts.append("\(unaccountedMounts.count) other mount(s) DrivePark cannot place")
+        }
+        return parts.joined(separator: "; ")
+    }
 }
 
 /// Where a disk that is not on the enclosure comes from.

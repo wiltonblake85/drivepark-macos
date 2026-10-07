@@ -108,6 +108,32 @@ public struct ParkOutcome {
         }.joined(separator: "; ")
     }
 
+    /// Why this is not safe to power off, for a notch card: drive names only.
+    public var cardSafetyReason: String {
+        snapshot?.verdict.cardReason ?? "something is still mounted"
+    }
+
+    /// Why this is not a park, for a notch card. Which drives, never which
+    /// programs held them or where anything lives: `problem` names the
+    /// blockers and their pids, and that stays in the menu and the CLI.
+    public var cardProblem: String {
+        if !backupInProgress.isEmpty {
+            return "Time Machine is backing up to "
+                + backupInProgress.map(\.displayName).joined(separator: ", ") + "."
+        }
+        if failure != nil {
+            return "DrivePark could not verify the park. The menu says why."
+        }
+        var parts: [String] = []
+        if !stillMounted.isEmpty {
+            parts.append("Still mounted: " + stillMounted.map(\.displayName).joined(separator: ", ") + ".")
+        }
+        if !missing.isEmpty {
+            parts.append("Not found on the fresh read: " + missing.map(\.displayName).joined(separator: ", ") + ".")
+        }
+        return parts.isEmpty ? "The park did not verify." : parts.joined(separator: " ")
+    }
+
     /// One line on why this is not a park, or nil when it is.
     public var problem: String? {
         if let failure { return failure }

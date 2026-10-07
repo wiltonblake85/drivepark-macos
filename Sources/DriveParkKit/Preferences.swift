@@ -4,6 +4,7 @@
 // volumes the moment it is installed has broken trust before it has earned it.
 
 import Foundation
+import Security
 
 /// An event that can cause an automatic park.
 public enum ParkTrigger: String, CaseIterable, Sendable {
@@ -305,37 +306,65 @@ public enum Preferences {
     // MARK: - Transom, the notch channel
     //
     // macOS refuses this app's notification banners at registration, so the
-    // card in the notch is the only visual signal that works here. On by
-    // default: it costs nothing when Transom is not installed, because a
-    // refused post is silent and never touches the park.
+    // card in the notch is the only visual signal that works here.
+    //
+    // Off by default since 2026-10-07 (audit, Low). It was on, and with no
+    // token every card went out as a transom:// link, which any installed app
+    // can register to receive, carrying volume and process names. A channel
+    // that sends what is on your drives to whoever claims a URL scheme is one
+    // a person should switch on knowingly.
 
     private static let transomEnabledKey = "transomEnabled"
-    private static let transomTokenKey = "transomToken"
+    private static let legacyTransomTokenKey = "transomToken"
+    private static let transomTokenAccount = "transom-token"
+
+    /// Existing installs keep what they chose. An explicit on or off is left
+    /// alone. An install that never touched the switch but saved a token was
+    /// using the cards, so it stays on; one that did neither gets the new
+    /// default. Runs once, on the first read.
+    private static let transomDefaultMigrated: Void = {
+        guard store.object(forKey: transomEnabledKey) == nil else { return }
+        let hadToken = !(store.string(forKey: legacyTransomTokenKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if hadToken { store.set(true, forKey: transomEnabledKey) }
+    }()
 
     public static var transomEnabled: Bool {
-        get { store.object(forKey: transomEnabledKey) as? Bool ?? true }
-        set { store.set(newValue, forKey: transomEnabledKey) }
+        get { _ = transomDefaultMigrated; return store.object(forKey: transomEnabledKey) as? Bool ?? false }
+        set { _ = transomDefaultMigrated; store.set(newValue, forKey: transomEnabledKey) }
     }
 
-    /// An explicit token, for when the Keychain read is declined or the token
-    /// is rotated. Plain text in the preferences domain, which is honest about
-    /// what it is: a loopback-only token for an app on this same Mac, not a
-    /// credential worth a Keychain round trip. The Keychain path is tried
-    /// first and needs no setup, so this stays empty for most installs.
+    /// The token for Transom's loopback API, from DrivePark's own Keychain
+    /// item. It lived in plain text in this preferences domain until
+    /// 2026-10-07; a token found there is moved into the Keychain on the first
+    /// read, and removed from preferences only once the Keychain has it.
     public static var transomToken: String? {
-        get {
-            let raw = store.string(forKey: transomTokenKey)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return (raw?.isEmpty ?? true) ? nil : raw
+        if let legacy = store.string(forKey: legacyTransomTokenKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !legacy.isEmpty {
+            guard saveTransomToken(legacy) else { return legacy }
         }
-        set {
-            let trimmed = newValue?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let trimmed, !trimmed.isEmpty {
-                store.set(trimmed, forKey: transomTokenKey)
-            } else {
-                store.removeObject(forKey: transomTokenKey)
-            }
+        let stored = Keychain.read(account: transomTokenAccount)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (stored?.isEmpty ?? true) ? nil : stored
+    }
+
+    /// Stores the token in the Keychain, or removes it for nil or empty.
+    /// - Returns: false when the Keychain refused, so the caller can say so
+    ///   instead of reporting a token saved that was not.
+    @discardableResult
+    public static func saveTransomToken(_ token: String?) -> Bool {
+        let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let saved: Bool
+        if trimmed.isEmpty {
+            saved = Keychain.delete(account: transomTokenAccount)
+        } else {
+            let status = Keychain.write(trimmed, account: transomTokenAccount,
+                                        label: "DrivePark: Transom token")
+            saved = status == errSecSuccess
+            if !saved { recordDiagnostic("transomTokenSave", "Keychain refused, OSStatus \(status)") }
         }
+        if saved { store.removeObject(forKey: legacyTransomTokenKey) }
+        return saved
     }
 }
 

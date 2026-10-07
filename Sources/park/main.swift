@@ -189,18 +189,17 @@ func postCardIfUnattended(_ outcome: ParkOutcome, scoped: Bool) {
         return
     }
     if outcome.parked {
-        let reason = outcome.safetyReason ?? "something is still mounted"
         if scoped {
             Transom.postAndWait(
                 title: "Selected drive parked",
-                message: "Not safe to undock: \(reason).",
+                message: "Not safe to undock: \(outcome.cardSafetyReason).",
                 symbol: "externaldrive",
                 duration: 10)
         } else {
             // Persistent: this one looks like success and is not.
             Transom.postAndWait(
                 title: "Parked, but do NOT undock",
-                message: "\(reason).",
+                message: "\(outcome.cardSafetyReason).",
                 symbol: "exclamationmark.triangle.fill",
                 persistent: true,
                 urgent: true)
@@ -208,7 +207,7 @@ func postCardIfUnattended(_ outcome: ParkOutcome, scoped: Bool) {
         return
     }
     Transom.postAndWait(title: "Park failed, do not undock",
-                        message: outcome.problem ?? "The park did not verify.",
+                        message: outcome.cardProblem,
                         symbol: "externaldrive.trianglebadge.exclamationmark",
                         persistent: true,
                         urgent: true)
@@ -477,11 +476,19 @@ case "transom" where arguments.dropFirst().first == "token":
     print("Transom → Preferences → Advanced → Local API. Paste the token, then Return.")
     print("Empty line clears the stored token.")
     let typed = (readLine() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    Preferences.transomToken = typed.isEmpty ? nil : typed
+    guard Preferences.saveTransomToken(typed) else {
+        print("The Keychain would not store the token. Nothing was saved.")
+        exit(2)
+    }
     Transom.forgetCachedToken()
     if typed.isEmpty {
-        print("Cleared.")
+        print("Cleared from the Keychain.")
         exit(0)
+    }
+    if !Preferences.transomEnabled {
+        // Saving a token is asking for cards, and they are off by default.
+        Preferences.transomEnabled = true
+        print("Notch cards switched on.")
     }
     if Transom.postAndWait(title: "DrivePark token saved",
                            message: "Park results will land here.",
