@@ -14,6 +14,7 @@
 import Foundation
 import IOKit
 import IOKit.pwr_mgt
+import IOKit.ps
 
 public struct TriggerStatus {
     public let trigger: ParkTrigger
@@ -23,11 +24,43 @@ public struct TriggerStatus {
     public let reason: String?
 }
 
-/// Reads a pmset setting. Small, cached by the caller, and timeout-guarded
-/// like every other subprocess in this codebase.
+/// The idle sleep setting, read the way pmset itself reads it.
+///
+/// Until 2026-10-07 this launched `pmset -g` on every 30 s refresh, on the
+/// main actor, with a 5 s timeout: around sleep and wake, when powerd is
+/// slowest to answer, the menu could freeze for the whole five seconds
+/// (audit, Medium). IOPMCopyActivePMPreferences is what pmset calls to print
+/// that line. It is not in the public headers, so it is looked up at run time
+/// and pmset stays as the fallback if a future macOS drops it.
 enum PowerSettings {
     /// Idle sleep timer in minutes. 0 means Never. nil means unreadable.
     static func idleSleepMinutes() -> Int? {
+        if let fromIOKit = idleSleepMinutesFromIOKit() { return fromIOKit }
+        return idleSleepMinutesFromPmset()
+    }
+
+    private typealias CopyActivePreferences = @convention(c) () -> Unmanaged<CFDictionary>?
+
+    private static let copyActivePreferences: CopyActivePreferences? = {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "IOPMCopyActivePMPreferences")
+        else { return nil }
+        return unsafeBitCast(symbol, to: CopyActivePreferences.self)
+    }()
+
+    /// The active profiles are keyed by power source ("AC Power", "Battery
+    /// Power"), the same strings IOPSGetProvidingPowerSourceType answers
+    /// with. Checked against `pmset -g` on the tower 2026-10-07: 0 on AC,
+    /// 1 on battery, the same as pmset printed.
+    static func idleSleepMinutesFromIOKit() -> Int? {
+        guard let copy = copyActivePreferences,
+              let profiles = copy()?.takeRetainedValue() as? [String: Any] else { return nil }
+        let source = (IOPSGetProvidingPowerSourceType(nil)?.takeUnretainedValue() as String?)
+            ?? "AC Power"
+        guard let profile = profiles[source] as? [String: Any] else { return nil }
+        return (profile["System Sleep Timer"] as? NSNumber)?.intValue
+    }
+
+    static func idleSleepMinutesFromPmset() -> Int? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
         process.arguments = ["-g"]

@@ -284,7 +284,15 @@ final class AppState: ObservableObject {
             // A volume put on the ignore list from the CLI is no longer this
             // app's to hold down either.
             engine.liftVetoForIgnored()
-            await MainActor.run { [weak self] in
+            // Asks powerd, which answers slowest exactly around sleep and
+            // wake. It used to run inside MainActor.run below, with pmset
+            // behind it, and froze the menu for up to five seconds (audit,
+            // Medium). Off the main actor, the menu never waits on it.
+            var warnings: [ParkTrigger: String] = [:]
+            for status in TriggerHealth.armedButDead() {
+                warnings[status.trigger] = status.reason
+            }
+            await MainActor.run { [weak self, warnings] in
                 guard let self else { return }
                 self.apply(read)
                 // Heartbeat. Every trigger in this app depends on the app
@@ -292,10 +300,6 @@ final class AppState: ObservableObject {
                 // was. Absence is the one failure it could not report.
                 Preferences.recordHeartbeat()
                 self.refreshing = false
-                var warnings: [ParkTrigger: String] = [:]
-                for status in TriggerHealth.armedButDead() {
-                    warnings[status.trigger] = status.reason
-                }
                 self.triggerWarnings = warnings
                 self.transomFailure = Transom.lastFailure
                 if self.enclosureStalled, self.message.isEmpty || self.message.hasPrefix("Enclosure") {
@@ -868,14 +872,24 @@ final class AppState: ObservableObject {
     func setTrigger(_ trigger: ParkTrigger, _ on: Bool) {
         Preferences.setEnabled(trigger, on)
         enabledTriggers = Preferences.enabledTriggers
-        let status = TriggerHealth.status(for: trigger)
-        if on, !status.canFire, let reason = status.reason {
-            // Say it at the moment they switch it on, not only in a submenu
-            // they may never open again.
-            message = reason
-            triggerWarnings[trigger] = reason
-        } else {
+        guard on else {
             triggerWarnings[trigger] = nil
+            return
+        }
+        // Read off the main actor, for the same reason as in refresh().
+        Task.detached {
+            let status = TriggerHealth.status(for: trigger)
+            await MainActor.run { [weak self] in
+                guard let self, self.enabledTriggers.contains(trigger) else { return }
+                if !status.canFire, let reason = status.reason {
+                    // Say it at the moment they switch it on, not only in a
+                    // submenu they may never open again.
+                    self.message = reason
+                    self.triggerWarnings[trigger] = reason
+                } else {
+                    self.triggerWarnings[trigger] = nil
+                }
+            }
         }
     }
 
