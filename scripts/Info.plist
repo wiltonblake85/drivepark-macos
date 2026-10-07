@@ -7,7 +7,8 @@
     <key>CFBundleIdentifier</key><string>com.wiltonblake.drivepark</string>
     <key>CFBundleExecutable</key><string>DrivePark</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <!-- Replaced at build time by build-app.sh with the git commit count. -->
+    <key>CFBundleVersion</key><string>0</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
@@ -19,6 +20,10 @@
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
+    <!-- Shown by macOS when DrivePark first touches a removable volume.
+         Without it the prompt has no reason in it, or access is refused. -->
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>DrivePark unmounts the volumes on your external drives, checks that they stay unmounted, and mounts them again when you ask.</string>
     <key>NSHumanReadableCopyright</key><string>© 2026 Wekesa Blake</string>
 </dict>
 </plist>
