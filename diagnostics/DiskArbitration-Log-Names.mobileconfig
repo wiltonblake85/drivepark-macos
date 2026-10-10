@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>Subsystems</key>
+            <dict>
+                <key>com.apple.DiskArbitration.diskarbitrationd</key>
+                <dict>
+                    <key>DEFAULT-OPTIONS</key>
+                    <dict>
+                        <key>Enable-Private-Data</key>
+                        <true/>
+                        <key>Default-Privacy-Setting</key>
+                        <string>Public</string>
+                    </dict>
+                </dict>
+            </dict>
+            <key>PayloadDisplayName</key>
+            <string>Disk Arbitration log names</string>
+            <key>PayloadIdentifier</key>
+            <string>com.wiltonblake.drivepark.diagnostics.diskarbitration-logging.payload</string>
+            <key>PayloadType</key>
+            <string>com.apple.system.logging</string>
+            <key>PayloadUUID</key>
+            <string>DC57D2DB-04CC-421B-A237-9261FF80B546</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+        </dict>
+    </array>
+    <key>PayloadDescription</key>
+    <string>Temporary, for DrivePark diagnostics. Shows the names diskarbitrationd normally hides as &lt;private&gt; in its own log lines, so the app that is slow to approve an unmount can be named. Affects only the subsystem com.apple.DiskArbitration.diskarbitrationd. Remove it when the diagnosis is done.</string>
+    <key>PayloadDisplayName</key>
+    <string>DrivePark diagnostics: Disk Arbitration log names</string>
+    <key>PayloadIdentifier</key>
+    <string>com.wiltonblake.drivepark.diagnostics.diskarbitration-logging</string>
+    <key>PayloadOrganization</key>
+    <string>DrivePark</string>
+    <key>PayloadRemovalDisallowed</key>
+    <false/>
+    <key>PayloadScope</key>
+    <string>System</string>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadUUID</key>
+    <string>2D42F80C-33A4-4D89-924D-4C36B963032B</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+</dict>
+</plist>

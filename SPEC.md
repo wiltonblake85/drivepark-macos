@@ -980,9 +980,8 @@ before a drive is up. Decision, Wekesa, 2026-10-10: shelved, not shipped. The
 code and its tests are on the branch `experiment/wake-first-park` (pushed);
 main and the installed app stay without it.
 
-What remains: an approval client that sometimes takes the full ~10 s to answer
-an unmount, drives awake or not. Naming it needs diskarbitrationd's session
-names, which the log redacts as <private>.
+What remained, NAMED the same day (next entry): the approval client was Leawo
+Blu-ray Player, and the Xbox-only hold is Xbox spinning up.
 
 Found while testing, FIXED the same day: an unattended `park now` (no
 terminal on stdout) posts a Transom card, which read the token from the
@@ -1003,3 +1002,40 @@ test on two assertions. Checked by hand: `park now --only disk7 | cat` parked Ba
 with 0 Keychain reads and 0 SecurityAgent launches; the diagnostic read
 "Keychain not read: nobody at a terminal to answer its prompt" and the card
 went by url scheme.
+
+### The slow approver is Leawo Blu-ray Player; the Xbox hold is spin-up, NAMED 2026-10-10
+
+With a configuration profile that shows diskarbitrationd's private log data
+for its own subsystem only (`diagnostics/DiskArbitration-Log-Names.mobileconfig`,
+payload com.apple.system.logging, Subsystems com.apple.DiskArbitration.diskarbitrationd,
+Enable-Private-Data and Default-Privacy-Setting Public; installed by Wekesa,
+admin password), session names read like "Leawo Blu-ray Player [42721]".
+
+Two separate holds, told apart by where the wait sits in the log:
+
+1. All drives wait for approvals that come back late, or one client times out
+   at ~10 s ("not responding"). Leawo Blu-ray Player, open since 2026-10-08
+   15:11 (after the October 2 fix, when parks were 3 s), was opening and
+   closing about 8 Disk Arbitration sessions a second (99 in 12 s). In the
+   08:50 park the late answers followed a burst of its sessions closing at
+   31.72; in the 07:27 park nine sessions closed 3 ms before the re-send.
+   Relaunched with names on, it registered "disk unmount approval" from two
+   sessions, and its QtWebEngineProcess helper from a third: every unmount on
+   the Mac waits for Leawo's yes. Leawo quit: 4 parks soon after a mount, none
+   with this pattern (with it running since Thursday, 6 of 8 comparable parks
+   had stalled). Leawo relaunched fresh: 1 clean park, 4.56 s. So a fresh copy
+   answers; the copy that had run 40-odd hours did not. Not a login item, no
+   launch agent: it was opened by hand and left running.
+
+2. Only Xbox waits, and Disk Arbitration does not even send Xbox's approvals
+   until about 7 s after the request (08:57: queued 24.133, approvals sent
+   31.120, all 63 answered in 13 ms, kernel unmount 8 ms). Xbox is NTFS,
+   mounted in user space, and the first drive to spin down: an uncached read
+   after 45 to 60 s idle takes 7.25 to 7.62 s. Woken first, it unmounted in
+   0.09 s (09:01, and 0.08 s at 09:04). The hold is its spin-up, paid
+   alongside the other drives, so a park with Xbox asleep is about 7 to 10 s,
+   inside the 20 s sleep budget. Waking it first only moves the wait.
+
+What to do: quit Leawo Blu-ray Player when no disc is playing; nothing in
+DrivePark can answer for another app's approval. Remove the logging profile
+once no more names are needed (System Settings, General, Device Management).
