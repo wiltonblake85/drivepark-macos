@@ -31,6 +31,7 @@ public enum Transom {
 
     private static let lock = NSLock()
     private static var cachedToken: String?
+    private static var keychainReadable = true
     private static var failure: String?
     private static var channel: String?
     private static let queue = DispatchQueue(label: "com.wiltonblake.drivepark.transom")
@@ -81,17 +82,46 @@ public enum Transom {
     public static func resolveToken() -> String? {
         lock.lock()
         if let cachedToken { lock.unlock(); return cachedToken }
+        let mayReadKeychain = keychainReadable
         lock.unlock()
 
-        if let environment = ProcessInfo.processInfo.environment["TRANSOM_TOKEN"],
-           !environment.isEmpty {
-            return cache(environment, source: "environment")
+        guard let picked = pickToken(environment: ProcessInfo.processInfo.environment["TRANSOM_TOKEN"],
+                                     mayReadKeychain: mayReadKeychain,
+                                     keychain: { Preferences.transomToken }) else {
+            Preferences.recordDiagnostic("transomTokenSource", mayReadKeychain
+                ? "none found" : "Keychain not read: nobody at a terminal to answer its prompt")
+            return nil
         }
-        if let stored = Preferences.transomToken {
-            return cache(stored, source: "keychain")
-        }
-        Preferences.recordDiagnostic("transomTokenSource", "none found")
-        return nil
+        return cache(picked.token, source: picked.source)
+    }
+
+    /// The environment first, then DrivePark's Keychain item, and the
+    /// Keychain only when this process may read it. Apart from
+    /// `resolveToken` so a test can show the Keychain is never asked.
+    static func pickToken(environment: String?, mayReadKeychain: Bool,
+                          keychain: () -> String?) -> (token: String, source: String)? {
+        if let environment, !environment.isEmpty { return (environment, "environment") }
+        guard mayReadKeychain, let stored = keychain() else { return nil }
+        return (stored, "keychain")
+    }
+
+    /// Stops this process from reading DrivePark's Keychain item, for the
+    /// rest of its life.
+    ///
+    /// For `park now` with nobody at a terminal. The item is in the login
+    /// keychain, which trusts only the binary that created it; any other
+    /// binary gets an "allow access" dialog, and every `swift build` of the
+    /// CLI is another binary. On 2026-10-10 that dialog came up three times
+    /// from unattended test parks and held one CLI for 77 s, on the one path
+    /// where nobody is there to answer it. Nothing can silence the dialog for
+    /// a login-keychain item: kSecUseAuthenticationUIFail and an LAContext
+    /// with interactionNotAllowed only apply to the Data Protection keychain
+    /// ("Legacy keychain items will still activate UI if needed", SecItem.h),
+    /// and SecKeychainSetUserInteractionAllowed has been deprecated since
+    /// macOS 10.10. So the unattended CLI does not ask: TRANSOM_TOKEN in its
+    /// environment if a script sets one, the transom:// door otherwise.
+    public static func neverReadKeychain() {
+        lock.lock(); keychainReadable = false; lock.unlock()
     }
 
     @discardableResult

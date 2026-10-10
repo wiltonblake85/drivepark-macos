@@ -914,5 +914,92 @@ Seen on the way, not explained: the ~10.6 s "not responding" approval stall
 came back on the first partial park of the day, 35 s after a mount, with
 Spotlight off on Plex and Backup (each unmount ~11 s, one diskarbitrationd
 "not responding" at 06:05:44). The park a minute later was 4.62 s, and the CLI
-park 70 s after a mount had no stall. Plex Media Server was running and is the
-first suspect; unconfirmed.
+park 70 s after a mount had no stall. Traced the same morning: see "A slow park
+is the drives waking up" below. Plex Media Server was not the cause.
+
+### A slow park is the drives waking up, TRACED 2026-10-10
+
+After the October 2 Spotlight fix, parks were 2.65 to 3.00 s. On October 10
+they were 8 to 25 s again: each unmount waiting 7.7 to 11.4 s, sometimes with
+one diskarbitrationd "not responding" at 10.1 s, sometimes without. Fourteen
+parks through the app and the CLI, 06:05 to 07:42, with the Disk Arbitration
+log, launchd's process log and timed reads alongside.
+
+Ruled out by test, in order:
+- System Settings' Storage page. Open since October 8, opening ~55 Disk
+  Arbitration sessions a second, and it does register unmount approvals (the
+  appex and StorageManagementService, seen at 07:19:04). Quitting it gave one
+  clean park, but with it quit the stall came back (07:24, 9.9 s) and with a
+  fresh copy open it stalled too (07:22, 11.4 s).
+- DrivePark's own sessions. A CLI park stalled as well (07:27, Xbox 6.4 s).
+  DiskEvents only schedules a read and returns, on its own queue.
+- Xbox, NTFS, mounted in user space by userfsd's UVFSService. Its service
+  exits at the end of some stalls, but with Xbox ignored and never mounted the
+  three APFS drives still waited 7.7 to 8.1 s (07:32).
+- Spotlight. Indexing is off on all four volumes, Xbox included. mds does
+  SIGKILL its workers on every unmount (4 to 17 at once), stalled or not; the
+  count does not track the stall.
+
+What it is: the drives go idle. An uncached 64 KB read 60 s after a mount, with
+nothing touching the drives, took 7.62 s on Xbox (spun down) and about 0.5 s on
+Plex and Backup (a lighter idle state they reach within 10 s even under reads
+every 10 s); the same read right after took 0.01 to 0.04 s. A park that lands
+on idle drives waits for them: whatever must touch the disk does, an approval
+client that looks at the volume can miss Disk Arbitration's 10 s answer
+window, and the waits run one after another rather than side by side. The
+worst case, 07:36, three minutes after a mount: 25.03 s, a 9.3 s approval wait
+then kernel unmounts of 8.5 and 12.3 s from "ongoing" to "success", which is
+spin-up time (Bottom Drawer 8.7 s, Plex 10.4, Backup 12.3, measured
+2026-09-08).
+
+The control: the drives touched shortly before the park, three times (the
+Storage page scanning them, a file search, an uncached read every 10 s), three
+clean parks of 2.88 to 3.53 s with every unmount under 1.3 s. Untouched, 8 of
+9 parks soon after a mount stalled. Real parks usually come after long idle,
+so on this tower a 10 to 25 s park is the normal case now, not the exception.
+
+Why it matters: 25 s is past `Preferences.sleepParkBudget` (20 s). A sleep park
+against idle drives can run out of time and stop with drives still mounted;
+safe, because nothing is forced and the report says so, but not parked.
+
+Built and measured the same day, and it did not pay: a wake-first park.
+After the veto goes up and before any unmount request, one uncached 64 KB read
+per disk, all at once, bounded at 15 s (less before sleep), then the unmounts.
+155 tests, three mutations caught. On the tower, through the CLI:
+- About 3 minutes idle: wake 8.44 s (Xbox 8.2, Bottom Drawer 8.4, Plex 5.2,
+  Backup 5.2), then a 10.7 s "not responding" with every drive awake, then
+  unmounts of 0.05 to 0.66 s in the kernel. 24.46 s, against 25.03 s without.
+- About 90 s idle: wake 8.22 s (Xbox 8.2, Plex 5.2), no approval stall, Plex
+  needed a second attempt. 15.17 s, inside the 10 to 17 s range without.
+What it showed: the wake does remove the spin-up from the unmounts, but the
+approval stall is not the drives. It came with every drive awake. Waking first
+only moves the spin-up wait from after the approvals to before them, and the
+total is unchanged. Overlapping the two (reads and unmount requests at once)
+would make the park's own open file a busy refusal whenever approvals clear
+before a drive is up. Decision, Wekesa, 2026-10-10: shelved, not shipped. The
+code and its tests are on the branch `experiment/wake-first-park` (pushed);
+main and the installed app stay without it.
+
+What remains: an approval client that sometimes takes the full ~10 s to answer
+an unmount, drives awake or not. Naming it needs diskarbitrationd's session
+names, which the log redacts as <private>.
+
+Found while testing, FIXED the same day: an unattended `park now` (no
+terminal on stdout) posts a Transom card, which read the token from the
+Keychain. The item is in the login keychain, which trusts only the binary
+that created it, and every `swift build` of the CLI is a new binary, so macOS
+showed an "allow access" dialog and the CLI waited on it: three times on
+2026-10-10 (06:21, 07:27, 08:16), 77 s the last time, on exactly the path with
+nobody to answer. Nothing silences that dialog for a login-keychain item:
+kSecUseAuthenticationUIFail and LAContext.interactionNotAllowed apply only to
+the Data Protection keychain (SecItem.h: "Legacy keychain items will still
+activate UI if needed"), and SecKeychainSetUserInteractionAllowed is
+deprecated since 10.10. So the unattended CLI no longer asks:
+`Transom.neverReadKeychain()` is called first thing in postCardIfUnattended,
+and the token comes from TRANSOM_TOKEN or the card goes by link. The app is
+unchanged. 143 tests (5 new, on the token choice, with the Keychain as a
+closure so no test touches the real one); dropping the switch fails one
+test on two assertions. Checked by hand: `park now --only disk7 | cat` parked Backup in 4 s
+with 0 Keychain reads and 0 SecurityAgent launches; the diagnostic read
+"Keychain not read: nobody at a terminal to answer its prompt" and the card
+went by url scheme.

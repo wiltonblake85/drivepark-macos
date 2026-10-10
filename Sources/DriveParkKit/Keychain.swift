@@ -3,9 +3,11 @@
 // One today: the Transom token, which sat in plain text in the preferences
 // domain, readable by anything running as this user with `defaults read`
 // (audit, Low). The item is created by whichever DrivePark binary saves it,
-// so macOS trusts that binary to read it back without asking; the other one
-// (the app for a token saved by `park transom token`, or the reverse) gets
-// the usual "allow access" prompt once.
+// so macOS trusts that binary to read it back without asking. Any other
+// binary gets the "allow access" dialog: the app for a token saved by `park
+// transom token`, or the reverse, and again after every rebuild of the CLI,
+// which changes its identity. An unattended CLI never reads it
+// (Transom.neverReadKeychain), because nobody is there to answer.
 
 import Foundation
 import Security

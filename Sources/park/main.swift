@@ -182,6 +182,9 @@ func appLivenessLine() -> String {
 /// does or what it exits with.
 func postCardIfUnattended(_ outcome: ParkOutcome, scoped: Bool) {
     guard isatty(STDOUT_FILENO) == 0 else { return }
+    // Nobody here to answer a Keychain dialog, so never raise one (see
+    // Transom.neverReadKeychain). The card goes by TRANSOM_TOKEN or by link.
+    Transom.neverReadKeychain()
     if outcome.parked && outcome.safeToPowerOff {
         Transom.postAndWait(
             title: "Safe to undock",
