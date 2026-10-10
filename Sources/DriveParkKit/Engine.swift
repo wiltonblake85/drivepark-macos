@@ -57,12 +57,18 @@ public struct ParkOutcome {
     /// to these volumes. A park a person asked for asks them about it and
     /// runs again with `.stopBackupIfRunning`; an automatic one stops here.
     public let backupInProgress: [Volume]
+    /// For a park that did not verify as a whole: the volumes in its scope
+    /// that the fresh read shows unmounted, which the veto keeps parked
+    /// (decided 2026-10-10). Empty for a verified park, where everything in
+    /// scope is held anyway, and for a run with no fresh read to stand on.
+    public let keptParked: [Volume]
 
     init(results: [VolumeParkResult] = [], stillMounted: [Volume] = [], missing: [Volume] = [],
          notes: [String] = [], timing: ParkTiming = ParkTiming(), failure: String? = nil,
          snapshot: DiskSnapshot? = nil, safetyReason: String? = nil,
-         backupInProgress: [Volume] = []) {
+         backupInProgress: [Volume] = [], keptParked: [Volume] = []) {
         self.backupInProgress = backupInProgress
+        self.keptParked = keptParked
         self.results = results
         self.stillMounted = stillMounted
         self.missing = missing
@@ -106,6 +112,14 @@ public struct ParkOutcome {
                 : result.blockers.joined(separator: ", ")
             return "\(result.volume.displayName): \(why)"
         }.joined(separator: "; ")
+    }
+
+    /// The drives a park that did not verify still keeps parked, as one
+    /// sentence, or nil. Names only, so the menu, the banner and the notch
+    /// card can all carry it.
+    public var keptParkedSentence: String? {
+        guard !keptParked.isEmpty else { return nil }
+        return "Kept parked: " + keptParked.map(\.displayName).joined(separator: ", ") + "."
     }
 
     /// Why this is not safe to power off, for a notch card: drive names only.
@@ -475,8 +489,9 @@ public final class Engine {
         // (audit H5). The courtesy spin-down can make an enclosure
         // re-enumerate and macOS automount what was just unmounted, and a veto
         // armed after that is too late to refuse it. If the park does not
-        // verify, the veto is put back as it was, so a failed run leaves no
-        // standing hold nobody asked for. Union, so per-drive parks accumulate.
+        // verify, the veto ends up holding what the fresh read shows parked
+        // and nothing else (vetoAfterIncompletePark). Union, so per-drive
+        // parks accumulate.
         let vetoBefore = ops.vetoedVolumeUUIDs
         let armed = vetoBefore.union(targets.filter { !isProtectedMountPoint($0.mountPoint) }
             .compactMap { $0.uuid?.lowercased() })
@@ -690,9 +705,20 @@ public final class Engine {
             }
         }
 
+        var keptParked: [Volume] = []
         if !check.ok {
-            if ops.vetoedVolumeUUIDs != vetoBefore { ops.vetoedVolumeUUIDs = vetoBefore }
-            notes.append("Remount veto put back as it was before this run: the park did not verify.")
+            let after = Self.vetoAfterIncompletePark(before: vetoBefore, targets: targets,
+                                                     check: check)
+            if ops.vetoedVolumeUUIDs != after.veto { ops.vetoedVolumeUUIDs = after.veto }
+            keptParked = after.kept
+            if after.kept.isEmpty {
+                notes.append("Remount veto put back as it was before this run: the park did not verify.")
+            } else {
+                let kept = after.kept.map(\.displayName).joined(separator: ", ")
+                let dropped = after.dropped.map(\.displayName).joined(separator: ", ")
+                notes.append("Remount veto kept on \(kept), verified unmounted"
+                             + (dropped.isEmpty ? "." : ", and dropped from \(dropped), which did not park."))
+            }
         }
         // A volume this run was responsible for and cannot find makes the
         // whole run unverified, not just unparked. Otherwise the read could
@@ -707,7 +733,38 @@ public final class Engine {
         return ParkOutcome(results: results, stillMounted: check.stillMounted,
                            missing: check.missing, notes: notes, timing: timing,
                            failure: failure, snapshot: check.snapshot,
-                           safetyReason: check.snapshot?.verdict.reason(isIgnored: isIgnored))
+                           safetyReason: check.snapshot?.verdict.reason(isIgnored: isIgnored),
+                           keptParked: keptParked)
+    }
+
+    /// What the veto holds after a park that did not verify as a whole.
+    ///
+    /// Decided 2026-10-10, after a partial park on the tower: Backup held
+    /// busy, the other three unmounted, and the veto was then put back as it
+    /// was before the run, so a plain `diskutil mount` brought Plex straight
+    /// back 23 s later. Someone who pressed Park asked for every one of
+    /// those drives to be parked. The one that refused stays mounted and
+    /// unvetoed; the ones that went down stay down.
+    ///
+    /// The veto follows the fresh read and nothing else. Kept: every volume
+    /// in scope that the read shows unmounted, or that this run removed on
+    /// purpose (a detached disk image). Dropped: anything the read shows
+    /// still mounted, and anything it cannot find, because not found is not
+    /// unmounted. No read at all keeps nothing new and puts the veto back as
+    /// it was (audit C1): a run that cannot verify claims nothing, a hold
+    /// included.
+    static func vetoAfterIncompletePark(before: Set<String>, targets: [Volume],
+                                        check: Verification)
+        -> (veto: Set<String>, kept: [Volume], dropped: [Volume]) {
+        guard check.snapshot != nil else { return (before, [], []) }
+        let notParked = Set((check.stillMounted + check.missing).compactMap { $0.uuid?.lowercased() })
+        let holdable = targets.filter { $0.uuid != nil && !isProtectedMountPoint($0.mountPoint) }
+        let kept = holdable.filter { !notParked.contains($0.uuid!.lowercased()) }
+        let dropped = holdable.filter {
+            let uuid = $0.uuid!.lowercased()
+            return notParked.contains(uuid) && !before.contains(uuid)
+        }
+        return (before.union(kept.map { $0.uuid!.lowercased() }), kept, dropped)
     }
 
     struct Verification {

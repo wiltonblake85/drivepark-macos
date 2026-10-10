@@ -70,7 +70,9 @@ DISCOVER -> UNMOUNT -> VERIFY -> PARK (hold) -> REPORT, plus UNPARK.
 - Fixed media -> park semantics; never promise detach.
 - Disk vanished mid-operation -> treat as parked if volumes gone; re-discover.
 - Partial park (2 of 3 disks) -> overall state is NOT PARKED; say which disk
-  and why. No green light on partial success.
+  and why. No green light on partial success. The disks that did park stay
+  held (2026-10-10, section 10); the one that refused is left mounted and
+  unvetoed.
 
 ## 5. CLI v1 surface
 
@@ -124,7 +126,8 @@ consulted but not copied.
      raw hex like `DA status 0xc010`.
   2. Partial park should still hold: when 2 of 3 disks park, `--hold` should
      veto remounts for the parked subset instead of exiting. Today it exits 1
-     before the hold engages.
+     before the hold engages. DONE 2026-10-10, in the engine for the app and
+     the CLI alike; see "Partial parks keep what parked" below.
   3. Consider naming the file(s) the blocker has open, not just the process.
 - T4 (2026-08-31, passed): with `--hold` active, `diskutil mount disk9s1`
   failed with the veto's own message: Parked by park. Release restored 3/3.
@@ -849,3 +852,67 @@ failed busy 0xC010, cleared on the +2 s rung) is not explained; it fell inside
 the same few minutes. If a stall returns, the trace to run is the
 `not responding` / `orphaned` query in the diskarbitrationd log with an lsof on
 the mount points during the wait (the 14:13 to 14:17 harness did exactly that).
+
+### Partial parks keep what parked, DECIDED, BUILT AND TESTED 2026-10-10
+
+A partial park used to drop the whole veto. Measured on the tower through the
+app: Backup held busy by a `sleep` whose working directory was on it (it writes
+nothing), Park Tower by the shortcut. Xbox, Bottom Drawer and Plex unmounted,
+Backup refused four rungs, and the park ended with no veto at all. A plain
+`diskutil mount disk8s1` 23 s later mounted Plex with nothing in the way. So
+the drives a person had just asked to park could come straight back from any
+app, any Finder click or any re-enumeration of the bridge, while the report
+pointed at Backup.
+
+Wekesa's decision: keep what parked. The audit's H5 rule, "a failed run leaves
+no standing hold nobody asked for", is unchanged in spirit: a person did ask
+for these drives to be parked.
+
+The rule, in `Engine.vetoAfterIncompletePark`: when a park does not verify as a
+whole, the veto follows the fresh read. Kept: every volume in the run's scope
+that the read shows unmounted, or that the run removed on purpose (a detached
+disk image). Dropped: anything still mounted, and anything the read cannot
+find, because not found is not unmounted. With no fresh read at all, nothing
+new is kept and the veto goes back exactly as it was (audit C1). The ignore
+list is untouched: an ignored volume is never a target, so never held. A
+partial park still gets no courtesy spin-down. `ParkOutcome.keptParked` names
+what stayed held; the menu line, the banner and the notch card end with "Kept
+parked: …", and the menu adds "Mount brings them back." `park now --hold` on a
+partial park holds the parked subset until Ctrl-C (exit 1) instead of exiting
+before the hold; without `--hold` it says what verified and that nothing holds
+it once the command exits. An automatic park already recorded what it took
+down even when the whole did not verify, so mount on wake undoes exactly that.
+
+Tests: 138 pass (135 plus 3 new; four existing tests that asserted an empty
+veto after a partial park now assert the exact subset). Mutations: restoring
+the old drop-everything rule fails 9 assertions in 5 tests; holding every
+target, the refusing one included, fails 15.
+
+Checked by hand on the tower with the CLI, so the running app and its veto
+were never touched: all four mounted, Backup held busy, `park now --hold`.
+Xbox 0.12 s, Bottom Drawer 0.60 s, Plex 0.19 s, Backup FAILED after four
+attempts in 20.91 s. The CLI printed "Remount veto kept on Xbox, Bottom Drawer,
+Plex, verified unmounted, and dropped from Backup, which did not park" and held;
+`park status` showed the CLI holding 3 volumes. `diskutil mount disk8s1` was
+refused with "Parked by DrivePark", rc 1, and the CLI logged the vetoed
+remount. Ctrl-C dropped the veto and exited 1. The app then parked the tower
+again and the tower was left as found: four volumes unmounted, the app holding
+the veto.
+
+Then through the app, build 53, installed with the four drives mounted so no
+parked drive went unvetoed across the restart: Backup held busy again, Park
+Tower by the shortcut. 30.67 s; Xbox, Bottom Drawer and Plex unmounted,
+Backup FAILED after four attempts. `park status` afterwards: "Remount veto
+held by DrivePark (pid 78042), 3 volume(s)", Backup mounted. `diskutil mount
+disk8s1` refused with "Parked by DrivePark", rc 1. The card went to Transom
+(`diag_lastPost` "accepted: Park failed"); its text could not be read back,
+because Transom's history.json is now encrypted, so the card and menu wording
+rest on the unit tests. Hold removed, Park Tower again: 3.91 s, all four
+unmounted, the app holding the veto on all four. Left that way.
+
+Seen on the way, not explained: the ~10.6 s "not responding" approval stall
+came back on the first partial park of the day, 35 s after a mount, with
+Spotlight off on Plex and Backup (each unmount ~11 s, one diskarbitrationd
+"not responding" at 06:05:44). The park a minute later was 4.62 s, and the CLI
+park 70 s after a mount had no stall. Plex Media Server was running and is the
+first suspect; unconfirmed.

@@ -839,12 +839,16 @@ final class AppState: ObservableObject {
         guard outcome.didWork || !outcome.parked else { return }
 
         if !outcome.parked {
-            let body = outcome.problem ?? "The park did not verify."
+            // A partial park keeps what did park (2026-10-10), and says so:
+            // otherwise "Park failed" reads as "nothing changed", and a drive
+            // that refuses to mount from Finder afterwards looks like a bug.
+            let kept = outcome.keptParkedSentence.map { " " + $0 } ?? ""
+            let body = (outcome.problem ?? "The park did not verify.") + kept
             Notifier.shared.post(title: "Park failed", body: body)
             // The card names drives, not the programs holding them (audit,
             // Low): `body` carries pids and paths, and stays on this Mac.
             Transom.post(title: "Park failed, do not undock",
-                         message: outcome.cardProblem,
+                         message: outcome.cardProblem + kept,
                          symbol: "externaldrive.trianglebadge.exclamationmark",
                          persistent: true,
                          urgent: true)
@@ -971,8 +975,9 @@ final class AppState: ObservableObject {
 
     private static func describe(_ outcome: ParkOutcome, label: String?,
                                  trigger: String?) -> String {
+        let kept = outcome.keptParkedSentence.map { " " + $0 + " Mount brings them back." } ?? ""
         if let failure = outcome.failure {
-            return outcome.didWork ? "Not parked. \(failure)" : failure
+            return outcome.didWork ? "Not parked. \(failure)" + kept : failure
         }
         let notSafe = outcome.safetyReason.map { " Not safe to power off: \($0)." } ?? ""
         if outcome.parked && !outcome.didWork {
@@ -993,7 +998,7 @@ final class AppState: ObservableObject {
             if let trigger { return "Parked because \(trigger)." + notSafe + split }
             return "Parked what DrivePark manages." + notSafe + split
         }
-        return "Not parked. " + (outcome.problem ?? "The park did not verify.")
+        return "Not parked. " + (outcome.problem ?? "The park did not verify.") + kept
     }
 
     // MARK: - Settings

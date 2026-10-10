@@ -227,6 +227,25 @@ func onlyDisksArgument() -> Set<String>? {
     return [arguments[valueIndex]]
 }
 
+/// Keeps this process, and so its veto, alive until Ctrl-C. The veto belongs
+/// to the process that registered it, so `--hold` is the only way a terminal
+/// park outlives the command.
+func holdUntilInterrupted(exitCode: Int32) -> Never {
+    signal(SIGINT, SIG_IGN)
+    let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+    sigint.setEventHandler {
+        // The liveness check in VetoBroker.holder would clear this record on
+        // the next read anyway, since the veto dies with this process.
+        // Clearing it here means `park status` in another terminal is right
+        // immediately rather than right on the next sweep.
+        VetoBroker.clearHold()
+        print("\nVeto dropped. Volumes remain unmounted; run `park mount` to mount them.")
+        exit(exitCode)
+    }
+    sigint.resume()
+    dispatchMain()
+}
+
 let arguments = CommandLine.arguments.dropFirst()
 switch arguments.first ?? "status" {
 case "status":
@@ -301,24 +320,22 @@ case "now":
         let exitCode: Int32 = (onlyDisks == nil && !outcome.safeToPowerOff) ? 1 : 0
         if arguments.contains("--hold") {
             print("Holding park: remount attempts will be refused. Ctrl-C to stop holding.")
-            signal(SIGINT, SIG_IGN)
-            let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-            sigint.setEventHandler {
-                // The liveness check in VetoBroker.holder would clear this
-                // record on the next read anyway, since the veto dies with
-                // this process. Clearing it here means `park status` in
-                // another terminal is right immediately rather than right on
-                // the next sweep.
-                VetoBroker.clearHold()
-                print("\nVeto dropped. Volumes remain unmounted; run `park mount` to mount them.")
-                exit(0)
-            }
-            sigint.resume()
-            dispatchMain()
+            holdUntilInterrupted(exitCode: 0)
         }
         exit(exitCode)
     } else {
         print("\nNOT PARKED. \(outcome.problem ?? "The park did not verify.")")
+        // A partial park keeps what did park (SPEC section 10, 2026-10-10).
+        // Here that lasts only as long as this process, so it is said as
+        // what it is, and `--hold` makes it last.
+        if !outcome.keptParked.isEmpty {
+            let names = outcome.keptParked.map(\.displayName).joined(separator: ", ")
+            if arguments.contains("--hold") {
+                print("Holding what did park: \(names). Remount attempts on them will be refused. Ctrl-C to stop holding.")
+                holdUntilInterrupted(exitCode: 1)
+            }
+            print("Verified unmounted: \(names). Add --hold to keep them parked after this command exits.")
+        }
         exit(1)
     }
 case "mount":

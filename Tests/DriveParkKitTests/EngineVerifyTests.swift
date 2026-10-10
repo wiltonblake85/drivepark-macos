@@ -5,6 +5,11 @@
 // turned three failed unmounts into a verified park. H5: the veto went up
 // after the spin-down. H4: force acted on stale, wider state. Each test below
 // is one of those, run against fakes that fail on cue.
+//
+// 2026-10-10: a park that does not verify as a whole no longer drops the
+// whole veto. It keeps what the fresh read shows parked and drops the rest;
+// with no fresh read it still keeps nothing new. The tests that asserted an
+// empty veto after a partial park now assert exactly that subset.
 
 import XCTest
 @testable import DriveParkKit
@@ -27,6 +32,7 @@ final class EngineVerifyTests: XCTestCase {
         // No veto left standing over volumes nobody verified, and no
         // spin-down after an unverified park.
         XCTAssertEqual(ops.vetoedVolumeUUIDs, [])
+        XCTAssertEqual(outcome.keptParked, [])
         XCTAssertFalse(ops.events.contains { $0.hasPrefix("eject") })
         // It did try: this is the case where the unmounts ran and the read
         // after them failed.
@@ -54,7 +60,10 @@ final class EngineVerifyTests: XCTestCase {
         XCTAssertFalse(outcome.parked)
         XCTAssertFalse(outcome.safeToPowerOff)
         XCTAssertEqual(outcome.missing.compactMap(\.uuid), [Tower.plex])
-        XCTAssertEqual(ops.vetoedVolumeUUIDs, [])
+        // The two the read found unmounted stay parked. The one it cannot
+        // find is not held: not found is not unmounted.
+        XCTAssertEqual(ops.vetoedVolumeUUIDs, [Tower.bottomDrawer, Tower.backup])
+        XCTAssertEqual(outcome.keptParked.compactMap(\.uuid), [Tower.bottomDrawer, Tower.backup])
     }
 
     func testDriveParkThatRenumberedAndStayedMountedIsNotParked() {
@@ -73,6 +82,10 @@ final class EngineVerifyTests: XCTestCase {
 
         XCTAssertFalse(outcome.parked)
         XCTAssertEqual(outcome.stillMounted.map(\.device), ["disk28s1"])
+        // The only drive in scope stayed mounted, so nothing is held, and the
+        // other two were never this run's to hold.
+        XCTAssertEqual(ops.vetoedVolumeUUIDs, [])
+        XCTAssertEqual(outcome.keptParked, [])
     }
 
     func testDriveParkThatRenumberedAndUnmountedIsFoundByUUID() {
@@ -158,7 +171,7 @@ final class EngineVerifyTests: XCTestCase {
         XCTAssertTrue(ops.vetoedVolumeUUIDs.contains(Tower.backup))
     }
 
-    func testVetoIsDroppedWhenTheParkFails() {
+    func testVetoIsDroppedFromTheVolumeThatRefused() {
         let discovery = FakeDiscovery([.success(Tower.snapshot(mounted: [Tower.backup])),
                                        .success(Tower.snapshot(mounted: [Tower.backup]))])
         let ops = FakeOps()
@@ -167,10 +180,66 @@ final class EngineVerifyTests: XCTestCase {
         let outcome = engine(discovery, ops).park()
 
         XCTAssertFalse(outcome.parked)
-        XCTAssertEqual(ops.vetoedVolumeUUIDs, [])
+        // Armed over Backup before the unmount, dropped from it after. The
+        // other two were already unmounted, are in a tower park's scope, and
+        // stay held, exactly as a verified tower park would hold them.
         XCTAssertTrue(ops.events.contains { $0.hasPrefix("veto [") && $0.contains(Tower.backup) })
+        XCTAssertEqual(ops.vetoedVolumeUUIDs, [Tower.bottomDrawer, Tower.plex])
         XCTAssertEqual(outcome.blockerSummary, "Backup: sleep (pid 4242)")
         XCTAssertEqual(outcome.results.first?.refusal, "Resource busy (0xc010)")
+    }
+
+    // MARK: - Partial parks keep what parked (2026-10-10)
+
+    func testPartialTowerParkKeepsTheDrivesThatUnmounted() {
+        // The tower test that decided it: Backup held busy, everything else
+        // unmounted, and the old code let all three come straight back.
+        let discovery = FakeDiscovery([.success(Tower.snapshot(mounted: Tower.all)),
+                                       .success(Tower.snapshot(mounted: [Tower.backup]))])
+        let ops = FakeOps()
+        ops.unmountAnswers["disk26s1"] = OpResult(success: false, detail: "Resource busy (0xc010)", busy: true)
+        ops.holders["/Volumes/Backup"] = ["sleep (pid 66161)"]
+        let outcome = engine(discovery, ops).park()
+
+        XCTAssertFalse(outcome.parked)
+        XCTAssertFalse(outcome.safeToPowerOff)
+        XCTAssertEqual(ops.vetoedVolumeUUIDs, [Tower.bottomDrawer, Tower.plex])
+        XCTAssertEqual(outcome.keptParked.compactMap(\.uuid), [Tower.bottomDrawer, Tower.plex])
+        XCTAssertEqual(outcome.keptParkedSentence, "Kept parked: Bottom Drawer, Plex.")
+        XCTAssertTrue(outcome.notes.contains {
+            $0.contains("Remount veto kept on") && $0.contains("dropped from Backup")
+        }, outcome.notes.joined(separator: "\n"))
+        // Still no courtesy spin-down on a park that did not verify.
+        XCTAssertFalse(ops.events.contains { $0.hasPrefix("eject") })
+    }
+
+    func testFailedDriveParkLeavesAnEarlierHoldAsItWas() {
+        // Bottom Drawer and Plex parked earlier and held. A park of Backup
+        // alone fails: nothing new is held, and nothing already held is lost.
+        let discovery = FakeDiscovery([.success(Tower.snapshot(mounted: [Tower.backup])),
+                                       .success(Tower.snapshot(mounted: [Tower.backup]))])
+        let ops = FakeOps()
+        ops.vetoedVolumeUUIDs = [Tower.bottomDrawer, Tower.plex]
+        ops.unmountAnswers["disk26s1"] = OpResult(success: false, detail: "Resource busy (0xc010)", busy: true)
+        let outcome = engine(discovery, ops).park(onlyDisks: ["disk25"])
+
+        XCTAssertFalse(outcome.parked)
+        XCTAssertEqual(ops.vetoedVolumeUUIDs, [Tower.bottomDrawer, Tower.plex])
+        XCTAssertEqual(outcome.keptParked, [])
+        XCTAssertNil(outcome.keptParkedSentence)
+        XCTAssertTrue(outcome.notes.contains { $0.contains("put back as it was") })
+    }
+
+    func testIgnoredVolumeIsNeverKeptByAPartialPark() {
+        let discovery = FakeDiscovery([.success(Tower.snapshot(mounted: Tower.all)),
+                                       .success(Tower.snapshot(mounted: [Tower.backup, Tower.plex]))])
+        let ops = FakeOps()
+        ops.unmountAnswers["disk26s1"] = OpResult(success: false, detail: "Resource busy (0xc010)", busy: true)
+        let outcome = engine(discovery, ops, ignored: { $0 == Tower.plex }).park()
+
+        XCTAssertFalse(outcome.parked)
+        XCTAssertEqual(ops.vetoedVolumeUUIDs, [Tower.bottomDrawer])
+        XCTAssertFalse(ops.events.contains("unmount disk24s1"))
     }
 
     func testVolumeBackAfterTheSpinDownIsCaught() {
@@ -185,7 +254,9 @@ final class EngineVerifyTests: XCTestCase {
         XCTAssertEqual(discovery.calls, 3)
         XCTAssertFalse(outcome.parked)
         XCTAssertFalse(outcome.safeToPowerOff)
-        XCTAssertEqual(ops.vetoedVolumeUUIDs, [])
+        // The read after the spin-down is the one that counts: Backup is back
+        // and is let go; the two it still shows unmounted stay held.
+        XCTAssertEqual(ops.vetoedVolumeUUIDs, [Tower.bottomDrawer, Tower.plex])
         XCTAssertTrue(outcome.notes.contains { $0.contains("mounted again after the spin-down") })
     }
 
