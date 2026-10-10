@@ -51,6 +51,14 @@ final class FakeOps: DiskOperating {
     var holders: [String: [String]] = [:]
     /// Devices that no longer hold the volume the engine read there.
     var movedAway: Set<String> = []
+    /// Wake answers by mount point. Anything not listed was already awake.
+    var wakeAnswers: [String: WakeResult] = [:]
+    /// The timeout each wake was given, in the order asked.
+    private var wakeTimeouts: [TimeInterval] = []
+    var wakeBudgets: [TimeInterval] {
+        lock.lock(); defer { lock.unlock() }
+        return wakeTimeouts
+    }
 
     var events: [String] {
         lock.lock(); defer { lock.unlock() }
@@ -88,6 +96,13 @@ final class FakeOps: DiskOperating {
     func blockers(mountPoint: String) -> [String] {
         lock.lock(); defer { lock.unlock() }
         return holders[mountPoint] ?? []
+    }
+
+    func wake(mountPoint: String, timeout: TimeInterval) -> WakeResult {
+        record("wake \(mountPoint)")
+        lock.lock(); defer { lock.unlock() }
+        wakeTimeouts.append(timeout)
+        return wakeAnswers[mountPoint] ?? .woke(seconds: 0.02)
     }
 
     var vetoedVolumeUUIDs: Set<String> {

@@ -21,6 +21,9 @@ public struct VolumeParkResult {
 /// whole point of this tool is that it does not guess about its own behaviour.
 public struct ParkTiming {
     public var discover: TimeInterval = 0
+    /// Reading from every drive at once before the first unmount, so drives
+    /// that had spun down wake together rather than one after another.
+    public var wake: TimeInterval = 0
     /// Reading hdiutil and detaching any image that pins a managed volume.
     public var diskImages: TimeInterval = 0
     public var unmount: TimeInterval = 0
@@ -30,8 +33,8 @@ public struct ParkTiming {
     public var total: TimeInterval = 0
 
     public var summary: String {
-        String(format: "%.2fs total (discover %.2f, images %.2f, unmount %.2f, verify %.2f, spin-down %.2f)",
-               total, discover, diskImages, unmount, verify, spinDown)
+        String(format: "%.2fs total (discover %.2f, wake %.2f, images %.2f, unmount %.2f, verify %.2f, spin-down %.2f)",
+               total, discover, wake, diskImages, unmount, verify, spinDown)
     }
 }
 
@@ -504,6 +507,32 @@ public final class Engine {
                          + "unmounted: macOS or another app can mount it again.")
         }
 
+        // WAKE (2026-10-10). The drives go idle within about a minute, and a
+        // park on idle drives waited for them one at a time: 25.03 s at
+        // worst, past the 20 s a sleep park gets. One read per drive, all at
+        // once, so the spin-ups overlap; then the unmounts find every drive
+        // awake. Only drives this run is about to unmount: never one that
+        // carries only ignored or already unmounted volumes. A read that does
+        // not come back in time is said and not waited on further.
+        let wakeStarted = Date()
+        let toWake = Self.wakeTargets(toUnmount: toUnmount, disks: disks)
+        if !toWake.isEmpty {
+            let budget = Self.wakeBudget(deadline: deadline)
+            if budget < 1 {
+                notes.append("Did not wake the drives first: out of time before sleep.")
+            } else {
+                progress("Waking \(toWake.map(\.displayName).joined(separator: ", "))")
+                let wakeLock = NSLock()
+                var answers = [WakeResult](repeating: .timedOut, count: toWake.count)
+                DispatchQueue.concurrentPerform(iterations: toWake.count) { index in
+                    let answer = ops.wake(mountPoint: toWake[index].mountPoint ?? "", timeout: budget)
+                    wakeLock.lock(); answers[index] = answer; wakeLock.unlock()
+                }
+                notes.append(contentsOf: Self.wakeNotes(toWake, answers, budget: budget))
+            }
+        }
+        timing.wake = Date().timeIntervalSince(wakeStarted)
+
         // A disk image backed by a file on one of these volumes pins it.
         // Resolved here, before the unmount loop, and never as a rung on the
         // retry ladder: measured on the tower 2026-09-09, the dissent lands in
@@ -735,6 +764,52 @@ public final class Engine {
                            failure: failure, snapshot: check.snapshot,
                            safetyReason: check.snapshot?.verdict.reason(isIgnored: isIgnored),
                            keptParked: keptParked)
+    }
+
+    /// The longest a wake waits, with no sleep coming. Backup, the slowest
+    /// bay, spins up in about 12.3 s (measured 2026-09-08).
+    static let wakeTimeout: TimeInterval = 15
+
+    /// How long the wake may take. Before sleep it leaves 6 s of the
+    /// deadline for the unmounts, the read after them and the report; under
+    /// a second is not worth starting.
+    static func wakeBudget(deadline: Date?, now: Date = Date()) -> TimeInterval {
+        guard let deadline else { return wakeTimeout }
+        return min(wakeTimeout, deadline.timeIntervalSince(now) - 6)
+    }
+
+    /// One mounted volume per disk this run is about to unmount from: reading
+    /// one volume wakes the whole drive. In discovery order.
+    static func wakeTargets(toUnmount: [Volume], disks: [PhysicalDisk]) -> [Volume] {
+        let going = Set(toUnmount.map(\.device))
+        return disks.compactMap { disk in
+            disk.allVolumes.first { going.contains($0.device) && $0.mountPoint != nil }
+        }
+    }
+
+    /// What the wake is worth saying. A drive that was already awake answers
+    /// in hundredths of a second and is not mentioned; one that took a second
+    /// or more had spun down, and the time it took is the time this park
+    /// would otherwise have spent waiting on it, likely more than once.
+    static func wakeNotes(_ volumes: [Volume], _ answers: [WakeResult],
+                          budget: TimeInterval) -> [String] {
+        var slow: [String] = []
+        var notes: [String] = []
+        for (volume, answer) in zip(volumes, answers) {
+            switch answer {
+            case .woke(let seconds) where seconds >= 1:
+                slow.append(String(format: "%@ %.1f s", volume.displayName, seconds))
+            case .timedOut:
+                notes.append(String(format: "%@ did not answer a read within %.0f s; parking it anyway.",
+                                    volume.displayName, budget))
+            default:
+                break
+            }
+        }
+        if !slow.isEmpty {
+            notes.insert("Woke the drives first, all at once: " + slow.joined(separator: ", ") + ".", at: 0)
+        }
+        return notes
     }
 
     /// What the veto holds after a park that did not verify as a whole.

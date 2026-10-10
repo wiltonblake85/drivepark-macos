@@ -986,9 +986,9 @@ final class AppState: ObservableObject {
         if outcome.parked {
             // The split rides along on the menu line so the answer to "why did
             // that take so long" is one click away, not a log query.
-            let split = String(format: " %.1fs: unmount %.1f, spin-down %.1f.",
-                               outcome.timing.total, outcome.timing.unmount,
-                               outcome.timing.spinDown)
+            let split = String(format: " %.1fs: wake %.1f, unmount %.1f, spin-down %.1f.",
+                               outcome.timing.total, outcome.timing.wake,
+                               outcome.timing.unmount, outcome.timing.spinDown)
             if outcome.safeToPowerOff {
                 if let label { return "\(label) parked. Safe to power off." + split }
                 if let trigger { return "Parked because \(trigger). Safe to power off." + split }
