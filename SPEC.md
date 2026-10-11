@@ -1039,3 +1039,64 @@ Two separate holds, told apart by where the wait sits in the log:
 What to do: quit Leawo Blu-ray Player when no disc is playing; nothing in
 DrivePark can answer for another app's approval. Remove the logging profile
 once no more names are needed (System Settings, General, Device Management).
+
+### fseventsd waits on a sleeping drive, and wake-first now pays, MEASURED 2026-10-11
+
+Wekesa's park through the app on the morning of 2026-10-11 took 22.97 s, with
+fseventsd and the Photos helpers "not responding". Leawo was not running.
+Ten parks followed through the CLI, each on a fully asleep tower (mount,
+4 minutes untouched, park), with the named Disk Arbitration log alongside.
+
+With the Photos helpers running (PhotosPosterProvider up since October 7,
+PhotosReliveWidget since October 9), the current build (A) against the
+shelved wake-first build (B), alternating:
+- A1 26.42 s. fseventsd and PhotosPosterProvider timed out at the same
+  instant (11:41:38.280); Backup's kernel unmount then took 12 s.
+- B1 16.26 s. Wake 12.03 s, unmounts under 0.8 s, no timeout.
+- A2 16.37 s. fseventsd timed out; both slow drives were up just after.
+- B2 26.76 s. Wake 12.29 s, then PhotosPosterProvider timed out with every
+  drive awake.
+Read at the time as "no gain", because the one Photos stall landed on B2.
+
+Then both Photos helpers were killed at 12:28; neither had relaunched by
+12:57. Same conditions, nothing else changed:
+- Current build: P1 24.58 s, P2 26.04 s, P3 24.76 s. fseventsd timed out
+  every time, and no other client did.
+- Wake-first build: W1 17.16 s (wake 12.22), W2 16.97 s (wake 12.25), W3
+  5.30 s (the drives had not gone to sleep; wake 0.61). No timeout in any.
+
+What the log shows (P1 and P2, full diskarbitrationd output): every other
+approval answers within 0.6 s of the request. fseventsd does not. The likely
+reason, inferred and not seen directly: it writes each volume's change journal
+before it lets go, which needs the drive spinning (it never timed out on an
+awake tower). Disk Arbitration gives up on it at 10.3 to 10.7 s and starts
+all three kernel unmounts at once. The drives fseventsd has already brought
+up finish in 0.2 to 2 s. The one it has not reached spins up from rest inside
+its kernel unmount: P1, Plex, "ongoing" 14.003 to "success" 24.284, 10.3 s,
+which is Plex's spin-up; P2, Backup, 56.837 to 09.016, 12.2 s, which is
+Backup's. fseventsd's own answers arrive at that same moment, "orphaned".
+The left-behind drive follows the order of the requests (P1 asked for Backup
+first and Plex was left; P2 asked for Plex first and Backup was left). So
+the two waits run back to back, 10.7 s and then 10 to 12 s, and the park is
+about 25 s. A2 at 16.37 s is the same chain with a lucky order.
+
+Across every asleep park on 2026-10-11: without the wake, 6 of 6 had the
+fseventsd timeout (16.4 to 26.4 s, five of six over 22 s); with the wake, 0
+of 4 did (16.3 to 17.2 s, plus B2 at 26.8 s from Photos).
+
+Why this reverses the October 10 shelving: that measurement's stall with
+every drive awake was Leawo, named afterwards and now quit, and this
+morning's comparison had the Photos stall on a wake-first run. Take the
+third-party approvers away and the two builds separate cleanly. The worst
+case does not change: an app that stalls adds its 10.7 s after the wake (B2),
+where without the wake it overlaps fseventsd's timeout (A1). The common case
+drops from about 25 s to about 17 s, which also brings a sleep park inside
+`Preferences.sleepParkBudget` (20 s). On an awake tower the wake costs 0.6 s
+(W3). The busy-refusal objection applies only to an overlapped wake; the
+branch reads, closes and then requests the unmounts.
+
+Decision, Wekesa, 2026-10-11: bring `experiment/wake-first-park` (1a15b67,
+based on 3bc0a06, 7 files) onto main and install it. The change lands in its
+own commit. PhotosPosterProvider timed out twice this morning,
+once on an awake tower; a fresh copy will relaunch on its own, and whether it
+behaves, as a fresh Leawo did, is not yet known.
