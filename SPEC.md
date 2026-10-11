@@ -38,20 +38,25 @@ unmounted, and state plainly when the enclosure is safe to power off.
 
 ## 3. Core loop
 
-DISCOVER -> UNMOUNT -> VERIFY -> PARK (hold) -> REPORT, plus UNPARK.
+DISCOVER -> WAKE -> UNMOUNT -> VERIFY -> PARK (hold) -> REPORT, plus UNPARK.
 
 1. DISCOVER. Enumerate external physical disks; map each APFS synthesized
    container to its physical store and each volume to its container; group
    disks into enclosures via IORegistry USB ancestry.
-2. UNMOUNT. Per disk, sequentially (never parallel ejects at one bridge):
+2. WAKE. One uncached 64 KB read from one volume on every disk this run will
+   unmount, all at once, bounded at 15 s (less before sleep), so drives that
+   had spun down are spinning before any unmount is asked for. Without it,
+   fseventsd's approval times out on a sleeping tower and the drive it had
+   not reached spins up inside its unmount (2026-10-11, section 10).
+3. UNMOUNT. Per disk, sequentially (never parallel ejects at one bridge):
    unmount every volume in the container via Disk Arbitration. On busy
    dissent, enumerate blocker PIDs (libproc/proc_listpidspath), report app
    names, offer remedies (quit app, pause Spotlight for the volume, wait).
    Retry ladder: immediate, +2 s, +5 s, +10 s. Force is opt-in only, never
    default.
-3. VERIFY. Re-read mount table and Disk Arbitration descriptions. A volume
+4. VERIFY. Re-read mount table and Disk Arbitration descriptions. A volume
    counts as unmounted only if the fresh read says so. Report per disk.
-4. PARK. Register a Disk Arbitration mount-approval callback and dissent any
+5. PARK. Register a Disk Arbitration mount-approval callback and dissent any
    automount of managed volume UUIDs while parked. This is the feature the
    incumbents lack: it keeps a re-presenting bridge from silently remounting.
    Additionally attempt a physical-disk eject as a courtesy spin-down (many
@@ -59,9 +64,9 @@ DISCOVER -> UNMOUNT -> VERIFY -> PARK (hold) -> REPORT, plus UNPARK.
    unmounted a volume on (field test 2026-10-02), and report its true
    effect honestly: "spun down" or "no effect", never "ejected" unless the
    device actually detached on re-read.
-5. REPORT. Single line of truth: "Tower parked. Safe to power off." or the
+6. REPORT. Single line of truth: "Tower parked. Safe to power off." or the
    named reason why not, per disk, with the blocking process when known.
-6. UNPARK. Drop the veto, mount volumes, verify mounts, report.
+7. UNPARK. Drop the veto, mount volumes, verify mounts, report.
 
 ## 4. Failure taxonomy
 
@@ -1100,3 +1105,42 @@ based on 3bc0a06, 7 files) onto main and install it. The change lands in its
 own commit. PhotosPosterProvider timed out twice this morning,
 once on an awake tower; a fresh copy will relaunch on its own, and whether it
 behaves, as a fresh Leawo did, is not yet known.
+
+SHIPPED the same day as c1d7b90, build 57, installed (comments updated to
+this finding, code unchanged from the branch; 160 tests; the three mutations
+fail 11, 1 and 7 tests). Two parks through the app by the shortcut, each
+about 4 minutes after an app mount:
+- 18:02:51, 25.44 s: wake 12.04 s, then PhotosPosterProvider "not
+  responding" at 10.7 s with every drive awake; each volume unmounted
+  11.1 to 11.5 s after its request.
+- 18:07:32, 25.49 s: wake 12.09 s, the same PhotosPosterProvider timeout.
+No fseventsd timeout in either: the wake does what it was built for. But a
+fresh PhotosPosterProvider (spawned 17:48:19) was back, and it stalled both
+times. launchd's log names who starts it: Messages.app (pid 59730, open since
+October 7). It is not the wallpaper
+(the wallpaper store has no Photos provider) and not the Photos widget
+(PhotosReliveWidget, never named in a timeout). Fresh does not help this one,
+unlike Leawo.
+
+Where that leaves the numbers. PhotosPosterProvider was running in 7 asleep
+parks today and stalled in 5 (the 22.97 s app park, A1, B2 and both build 57
+parks); the two where it answered were 16.3 and 16.4 s. With it stalling, a
+park is 23.0 to 26.4 s without the wake (its timeout overlaps fseventsd's,
+then the left-behind drive spins up, Plex 10.4 s or Backup 12.3 s) and 25.4
+to 25.5 s with it (the spin-up first, then its timeout). With it quiet or
+absent, the wake makes a park about 17 s every time where the old build
+ranged 16 to 26 s. So the wake can cost up to about 2.5 s when the poster
+provider stalls and the left-behind drive would have been Plex, and saves
+about 8 s whenever it behaves. The poster provider is now the whole remaining
+gap, and DrivePark cannot answer for another app's approval. The name and the
+spawner suggest Messages draws contact posters with it; that is inferred, not
+traced. Not tried yet: whether quitting Messages takes PhotosPosterProvider
+down with it.
+
+Hiding the poster provider's 10.7 s behind the spin-up would need the
+unmount requests sent while the wake reads are still open. Disk Arbitration
+starts the kernel unmounts when that timeout fires, at 10.7 s, before
+Backup's 12.3 s spin-up ends; the read's open file makes Backup's unmount a
+busy refusal, and a retry asks every approver again, the poster provider
+included (it stalled on both build 57 parks, so a timed-out session is asked
+again). Not built.
