@@ -128,6 +128,9 @@ private final class MovesAfterFirstRefusal: DiskOperating {
         inner.identifies(volume, atBSDName: bsdName)
     }
     func blockers(mountPoint: String) -> [String] { [] }
+    func wake(mountPoint: String, timeout: TimeInterval) -> WakeResult {
+        inner.wake(mountPoint: mountPoint, timeout: timeout)
+    }
     var vetoedVolumeUUIDs: Set<String> {
         get { inner.vetoedVolumeUUIDs }
         set { inner.vetoedVolumeUUIDs = newValue }

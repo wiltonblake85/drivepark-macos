@@ -53,6 +53,9 @@ public protocol DiskOperating: AnyObject {
     func identifies(_ volume: Volume, atBSDName bsdName: String) -> Bool
     /// The processes holding files open under a mount point.
     func blockers(mountPoint: String) -> [String]
+    /// Makes the disk under a mount point spin up by reading from it past
+    /// every cache, and waits at most `timeout` for the read. Never writes.
+    func wake(mountPoint: String, timeout: TimeInterval) -> WakeResult
     /// Volume UUIDs whose remount is refused. Setting it changes the veto at
     /// once and publishes who holds it.
     var vetoedVolumeUUIDs: Set<String> { get set }
@@ -185,6 +188,20 @@ final class DiskOps: DiskOperating {
 
     func blockers(mountPoint: String) -> [String] {
         lsofBlockers(mountPoint: mountPoint)
+    }
+
+    /// The read runs on its own thread and this waits for it with a timeout.
+    /// During an enclosure stall (SPEC section 10, 2026-08-31) a read can sit
+    /// in the kernel indefinitely; that thread is then left behind rather
+    /// than letting it hang the park, the same rule lsof runs under.
+    func wake(mountPoint: String, timeout: TimeInterval) -> WakeResult {
+        let box = WakeBox()
+        let started = Date()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let read = uncachedProbeRead(under: mountPoint)
+            box.finish(read ? .woke(seconds: Date().timeIntervalSince(started)) : .nothingToRead)
+        }
+        return box.wait(timeout: timeout) ?? .timedOut
     }
 
     var vetoedVolumeUUIDs: Set<String> {
