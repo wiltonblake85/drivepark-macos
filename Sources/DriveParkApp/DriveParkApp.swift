@@ -140,6 +140,15 @@ final class AppState: ObservableObject {
     /// A read was asked for while another read, a park or a mount was
     /// running. It happens as soon as that finishes, rather than being lost.
     private var refreshOwed = false
+    /// When Disk Arbitration delivered the latest event behind the owed read,
+    /// and whether anything other than a disk event asked for it. A park's
+    /// own last check can answer disk events that came before it, and
+    /// nothing else (see finish).
+    private var owedDiskChangeAt: Date?
+    private var owedForMoreThanDiskChanges = false
+    /// The last park, for the time of its last check. A disk event delivered
+    /// before that check was seen by it (ParkOutcome.answersDiskChange).
+    private var lastPark: ParkOutcome?
 
     // Mirrors of persisted preferences, so SwiftUI sees the changes.
     @Published var enabledTriggers: Set<ParkTrigger> = Preferences.enabledTriggers
@@ -206,8 +215,8 @@ final class AppState: ObservableObject {
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
         if let diskEvents {
-            diskEvents.start { [weak self] in
-                Task { @MainActor in self?.refresh() }
+            diskEvents.start { [weak self] at in
+                Task { @MainActor in self?.refresh(diskChangeAt: at) }
             }
         } else {
             // Without events, the backstop is the only way a new mount is
@@ -313,16 +322,33 @@ final class AppState: ObservableObject {
         pruneForceOffer()
     }
 
-    func refresh() {
+    /// - Parameter diskChangeAt: when Disk Arbitration delivered the last
+    ///   event of the burst that asked for this read. Nil for every other
+    ///   reason to read.
+    func refresh(diskChangeAt: Date? = nil) {
+        // A burst the last park's own check already saw: the park's own
+        // unmounts, reported 1.5 s late, just after its spin-down. Read for
+        // it and the read waits on drives that are stopping, times out, and
+        // takes the checkmark down (2026-10-14).
+        if let at = diskChangeAt, lastPark?.answersDiskChange(deliveredAt: at) == true {
+            return
+        }
         // Not during a park or a mount: a read that starts before one finishes
         // and lands after it would put an older state over the verified one.
         // Owed instead, so a disk that changed in the meantime is still read.
         guard !refreshing, !busy else {
             refreshOwed = true
+            if let at = diskChangeAt {
+                owedDiskChangeAt = max(owedDiskChangeAt ?? at, at)
+            } else {
+                owedForMoreThanDiskChanges = true
+            }
             return
         }
         refreshing = true
         refreshOwed = false
+        owedDiskChangeAt = nil
+        owedForMoreThanDiskChanges = false
         let engine = self.engine
         Task.detached {
             let read = Result { try engine.discover() }
@@ -779,6 +805,16 @@ final class AppState: ObservableObject {
     private func finish(_ outcome: ParkOutcome, read: Result<DiskSnapshot, Error>,
                         label: String?, trigger: String?, scoped: Bool, offersForce: Bool) {
         apply(read)
+        lastPark = outcome
+        // The read owed for disk events that came while this park ran, all
+        // of them before its last check, would only repeat that check, on
+        // drives still stopping (2026-10-14). Anything else that asked for a
+        // read still gets one when busy drops below.
+        if refreshOwed, !owedForMoreThanDiskChanges, let at = owedDiskChangeAt,
+           outcome.answersDiskChange(deliveredAt: at) {
+            refreshOwed = false
+            owedDiskChangeAt = nil
+        }
         busy = false
         stopTicking()
         message = Self.describe(outcome, label: label, trigger: trigger)
@@ -931,7 +967,17 @@ final class AppState: ObservableObject {
     /// a drive is often the name of what is on it.
     nonisolated private static func record(_ outcome: ParkOutcome, trigger: String) {
         guard outcome.didWork else {
-            parkLog.notice("park (\(trigger, privacy: .public)): nothing to do")
+            // A refused park touches nothing, like one with nothing to do,
+            // and until 2026-10-24 it was logged as one: four screen-lock
+            // parks that day said "nothing to do" with two volumes mounted,
+            // each refused by a read that timed out. The reason is a note,
+            // private like every note.
+            if let failure = outcome.failure {
+                parkLog.notice("park (\(trigger, privacy: .public)): REFUSED, nothing was touched")
+                logNote(failure)
+            } else {
+                parkLog.notice("park (\(trigger, privacy: .public)): nothing to do")
+            }
             return
         }
         parkLog.notice("park (\(trigger, privacy: .public)): \(outcome.timing.summary, privacy: .public)")

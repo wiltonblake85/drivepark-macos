@@ -17,7 +17,7 @@ public final class DiskEvents {
     private let queue = DispatchQueue(label: "drivepark.diskevents", qos: .utility)
     private let session: DASession
     private let settle: TimeInterval
-    private var onChange: (() -> Void)?
+    private var onChange: ((Date) -> Void)?
     private var pending: DispatchWorkItem?
     private var registered = false
 
@@ -40,12 +40,15 @@ public final class DiskEvents {
     }
 
     /// Starts listening. `onChange` runs on a background queue, once per
-    /// burst, after the disks have been quiet for `settle` seconds.
+    /// burst, after the disks have been quiet for `settle` seconds, and is
+    /// given the time of the burst's last event. A park compares that time
+    /// with its own last check (ParkOutcome.answersDiskChange): the burst is
+    /// reported `settle` seconds late, and by then the park may have seen it.
     ///
     /// Disk Arbitration answers the registration with an appeared event for
     /// every disk already attached, so the first call comes shortly after
     /// this one.
-    public func start(_ onChange: @escaping () -> Void) {
+    public func start(_ onChange: @escaping (Date) -> Void) {
         queue.async { [self] in
             self.onChange = onChange
             guard !registered else { return }
@@ -71,7 +74,8 @@ public final class DiskEvents {
     /// On `queue`, where Disk Arbitration delivers.
     private func noteChange() {
         pending?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.onChange?() }
+        let at = Date()
+        let work = DispatchWorkItem { [weak self] in self?.onChange?(at) }
         pending = work
         queue.asyncAfter(deadline: .now() + settle, execute: work)
     }

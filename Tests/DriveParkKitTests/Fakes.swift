@@ -19,6 +19,12 @@ final class FakeDiscovery: DiskDiscovering {
     private let reads: [Result<DiskSnapshot, Error>]
     private var count = 0
     var images: [AttachedImage]? = []
+    /// Kernel mount tables, answered in order; the last one repeats. Left
+    /// empty, the table is the one the last successful read kept, which is
+    /// to say nothing has mounted since: the usual case after a park.
+    var mountTables: [[KernelMount]?] = []
+    private var tableCount = 0
+    private var lastSeenTable: [KernelMount]?
 
     init(_ reads: [Result<DiskSnapshot, Error>]) {
         self.reads = reads
@@ -29,15 +35,29 @@ final class FakeDiscovery: DiskDiscovering {
         return count
     }
 
+    var mountTableCalls: Int {
+        lock.lock(); defer { lock.unlock() }
+        return tableCount
+    }
+
     func discover() throws -> DiskSnapshot {
         lock.lock()
         let read = reads[min(count, reads.count - 1)]
         count += 1
+        if case .success(let snapshot) = read { lastSeenTable = snapshot.kernelMounts }
         lock.unlock()
         return try read.get()
     }
 
     func attachedImages() -> [AttachedImage]? { images }
+
+    func kernelMounts() -> [KernelMount]? {
+        lock.lock(); defer { lock.unlock() }
+        let index = tableCount
+        tableCount += 1
+        guard !mountTables.isEmpty else { return lastSeenTable }
+        return mountTables[min(index, mountTables.count - 1)]
+    }
 }
 
 /// Records every operation in order. Succeeds unless told otherwise.
@@ -160,19 +180,30 @@ enum Tower {
         Bay(disk: "disk25", container: "disk26", volume: "disk26s1", name: "Backup", uuid: backup),
     ]
 
-    /// The tower with the named volumes mounted at /Volumes/<name>.
+    /// The tower with the named volumes mounted at /Volumes/<name>, and the
+    /// kernel mount table that read would have kept.
     static func snapshot(mounted: Set<String> = [], bays: [Bay] = bays,
                          unaccounted: [UnaccountedMount] = []) -> DiskSnapshot {
         let disks = bays.map { bay -> PhysicalDisk in
             var disk = PhysicalDisk(device: bay.disk)
-            let point = mounted.contains(bay.uuid)
-                ? "/Volumes/\(bay.name.trimmingCharacters(in: .whitespaces))" : nil
+            let point = mounted.contains(bay.uuid) ? mountPoint(bay) : nil
             disk.containers = [Container(device: bay.container, physicalStore: bay.disk + "s2",
                                          volumes: [Volume(device: bay.volume, name: bay.name,
                                                           mountPoint: point, uuid: bay.uuid)])]
             return disk
         }
-        return DiskSnapshot(disks: disks, unaccountedMounts: unaccounted)
+        let table = bays.filter { mounted.contains($0.uuid) }.map(kernelMount)
+            + unaccounted.map { KernelMount(source: "/dev/\($0.device)", mountPoint: $0.mountPoint) }
+        return DiskSnapshot(disks: disks, unaccountedMounts: unaccounted, kernelMounts: table)
+    }
+
+    static func mountPoint(_ bay: Bay) -> String {
+        "/Volumes/\(bay.name.trimmingCharacters(in: .whitespaces))"
+    }
+
+    /// The kernel's entry for this bay's volume, mounted.
+    static func kernelMount(_ bay: Bay) -> KernelMount {
+        KernelMount(source: "/dev/\(bay.volume)", mountPoint: mountPoint(bay), fileSystem: "apfs")
     }
 
     static let all: Set<String> = [bottomDrawer, plex, backup]

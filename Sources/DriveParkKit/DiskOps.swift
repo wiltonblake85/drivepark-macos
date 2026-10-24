@@ -32,12 +32,17 @@ public protocol DiskDiscovering {
     func discover() throws -> DiskSnapshot
     /// Attached disk images, or nil when hdiutil did not answer.
     func attachedImages() -> [AttachedImage]?
+    /// The kernel's mount table, or nil when it could not be read. Answered
+    /// by the kernel alone: no process launch, and no disk is asked, so a
+    /// drive that is stopping cannot make it wait.
+    func kernelMounts() -> [KernelMount]?
 }
 
 public struct SystemDiscovery: DiskDiscovering {
     public init() {}
     public func discover() throws -> DiskSnapshot { try discoverExternalDisks() }
     public func attachedImages() -> [AttachedImage]? { readAttachedImages() }
+    public func kernelMounts() -> [KernelMount]? { readKernelMounts() }
 }
 
 /// Everything Engine does to the disks.

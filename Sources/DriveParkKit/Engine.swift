@@ -27,7 +27,9 @@ public struct ParkTiming {
     /// Reading hdiutil and detaching any image that pins a managed volume.
     public var diskImages: TimeInterval = 0
     public var unmount: TimeInterval = 0
-    /// Both fresh reads: after the unmount, and again after the spin-down.
+    /// The fresh read after the unmount, plus the check after the spin-down:
+    /// the kernel's mount table, or a second full read when something new is
+    /// mounted (2026-10-14).
     public var verify: TimeInterval = 0
     public var spinDown: TimeInterval = 0
     public var total: TimeInterval = 0
@@ -65,13 +67,18 @@ public struct ParkOutcome {
     /// (decided 2026-10-10). Empty for a verified park, where everything in
     /// scope is held anyway, and for a run with no fresh read to stand on.
     public let keptParked: [Volume]
+    /// When the last check this run stands behind finished: the fresh read,
+    /// or the mount-table check after the spin-down. Nil for a run that
+    /// touched nothing.
+    public let checkedAt: Date?
 
     init(results: [VolumeParkResult] = [], stillMounted: [Volume] = [], missing: [Volume] = [],
          notes: [String] = [], timing: ParkTiming = ParkTiming(), failure: String? = nil,
          snapshot: DiskSnapshot? = nil, safetyReason: String? = nil,
-         backupInProgress: [Volume] = [], keptParked: [Volume] = []) {
+         backupInProgress: [Volume] = [], keptParked: [Volume] = [], checkedAt: Date? = nil) {
         self.backupInProgress = backupInProgress
         self.keptParked = keptParked
+        self.checkedAt = checkedAt
         self.results = results
         self.stillMounted = stillMounted
         self.missing = missing
@@ -97,6 +104,29 @@ public struct ParkOutcome {
 
     /// True when this run actually tried to unmount something.
     public var didWork: Bool { !results.isEmpty }
+
+    /// True when a disk event Disk Arbitration delivered at `delivered` came
+    /// before this park's last check, so a read for it would only repeat
+    /// that check.
+    ///
+    /// The app reads the disks after every burst of disk events. A park's own
+    /// unmounts are a burst, reported 1.5 s after its last event, which now
+    /// lands just after the spin-down. A read then runs `diskutil info` on
+    /// drives that are stopping, the same 5 to 12 s waits that made the check
+    /// after the spin-down fail (2026-10-14), so it would time out and turn
+    /// the checkmark into "cannot verify". An event delivered before the last
+    /// check is a change that check already saw, and for the mount-table
+    /// check that means every mount. What the table cannot show, a disk that
+    /// appears with nothing mounted or a volume that unmounts after the
+    /// verified read, waits for the next event or the backstop read; neither
+    /// can make the menu say safe when it is not.
+    ///
+    /// Never for a park with a failure: with no read to stand on, the next
+    /// read is the only answer the menu can have.
+    public func answersDiskChange(deliveredAt delivered: Date) -> Bool {
+        guard failure == nil, snapshot != nil, let checkedAt else { return false }
+        return delivered <= checkedAt
+    }
 
     /// Nothing on any discovered disk is mounted, managed or ignored, and the
     /// kernel reports no mount the read could not account for. The only basis
@@ -687,6 +717,11 @@ public final class Engine {
         var check = verify(targets, scope: scope, mayVanish: mayVanish,
                            stage: "the park")
         timing.verify = Date().timeIntervalSince(verifyStarted)
+        var checkedAt = Date()
+        // The read this run verified the park on, taken before the spin-down
+        // could change anything. The veto falls back on it when the check
+        // after the spin-down cannot finish.
+        let verifiedRead = check
 
         // The courtesy spin-down, only after a verified park. A run that did
         // not park leaves the drives spinning: nobody is about to unplug
@@ -723,13 +758,18 @@ public final class Engine {
                 }
             }
             timing.spinDown = Date().timeIntervalSince(spinStarted)
-            // And read again (audit H5). The first read said parked before the
-            // eject; what matters is whether it is still true after it.
+            // And check again (audit H5). The first read said parked before
+            // the eject; what matters is whether it is still true after it.
+            // Asked of the kernel's mount table, not of the drives that were
+            // just told to stop (2026-10-14, see recheckAfterSpinDown).
             if sent {
                 let again = Date()
-                check = verify(targets, scope: scope, mayVanish: mayVanish,
-                               stage: "the spin-down")
+                let rechecked = recheckAfterSpinDown(check, targets: targets, scope: scope,
+                                                     mayVanish: mayVanish)
+                check = rechecked.check
+                notes.append(contentsOf: rechecked.notes)
                 timing.verify += Date().timeIntervalSince(again)
+                checkedAt = Date()
                 for volume in check.stillMounted {
                     notes.append("\(volume.displayName): mounted again after the spin-down")
                 }
@@ -738,12 +778,24 @@ public final class Engine {
 
         var keptParked: [Volume] = []
         if !check.ok {
+            // The veto follows the last read this run finished. When the read
+            // after the spin-down did not finish, that is the read before it,
+            // which verified everything in scope unmounted. A read that could
+            // not answer is no evidence that anything came back, and dropping
+            // the hold on its account left every drive free to remount
+            // (2026-10-14). With no finished read at all, the veto still goes
+            // back as it was (audit C1).
+            let fellBack = check.snapshot == nil && verifiedRead.ok
             let after = Self.vetoAfterIncompletePark(before: vetoBefore, targets: targets,
-                                                     check: check)
+                                                     check: fellBack ? verifiedRead : check)
             if ops.vetoedVolumeUUIDs != after.veto { ops.vetoedVolumeUUIDs = after.veto }
             keptParked = after.kept
             if after.kept.isEmpty {
                 notes.append("Remount veto put back as it was before this run: the park did not verify.")
+            } else if fellBack {
+                let kept = after.kept.map(\.displayName).joined(separator: ", ")
+                notes.append("Remount veto kept on \(kept): the read before the spin-down verified "
+                             + "them unmounted, and the read after it did not finish.")
             } else {
                 let kept = after.kept.map(\.displayName).joined(separator: ", ")
                 let dropped = after.dropped.map(\.displayName).joined(separator: ", ")
@@ -765,7 +817,7 @@ public final class Engine {
                            missing: check.missing, notes: notes, timing: timing,
                            failure: failure, snapshot: check.snapshot,
                            safetyReason: check.snapshot?.verdict.reason(isIgnored: isIgnored),
-                           keptParked: keptParked)
+                           keptParked: keptParked, checkedAt: checkedAt)
     }
 
     /// The longest a wake waits, with no sleep coming. Backup, the slowest
@@ -853,13 +905,63 @@ public final class Engine {
     }
 
     private func verify(_ expected: [Volume], scope: Scope, mayVanish: Set<String>,
-                        stage: String) -> Verification {
+                        stage: String,
+                        claim: String = "Nothing is claimed as parked.") -> Verification {
         do {
             let snapshot = try discovery.discover()
             return Self.compare(expected, against: snapshot, scope: scope,
                                 mayVanish: mayVanish, isIgnored: isIgnored)
         } catch {
-            return Verification(failure: "Could not verify \(stage): \(error). Nothing is claimed as parked.")
+            return Verification(failure: "Could not verify \(stage): \(error). \(claim)")
+        }
+    }
+
+    /// The check after the courtesy spin-down: does the verified read still
+    /// hold?
+    ///
+    /// Asked of the kernel's mount table, not of the drives (2026-10-14). It
+    /// used to be a second full read, and a full read runs `diskutil info`
+    /// on every disk. Right after DADiskEject each of those waits on a drive
+    /// that is stopping: measured on the tower, 5.6, 7.7, 10.3 and 12.1 s,
+    /// one disk after another. The last two ran past the 10 s timeout, the
+    /// read failed, and all three parks that day said "Park failed, do not
+    /// undock" over drives that were unmounted, after waking the drives the
+    /// spin-down had just stopped.
+    ///
+    /// An eject can undo a verified park in one way only: a volume comes
+    /// back, and a volume that comes back is a mount. The kernel's mount
+    /// table answers without asking any disk (MNT_NOWAIT), and the verified
+    /// read kept its own copy of it. Nothing in the table now that was not
+    /// in that copy: the verified read stands. Anything new gets the full
+    /// read, as before, to say what it is. So does a read that kept no copy,
+    /// and a table that cannot be read.
+    private func recheckAfterSpinDown(_ verified: Verification, targets: [Volume], scope: Scope,
+                                      mayVanish: Set<String>) -> (check: Verification, notes: [String]) {
+        let fullRead = {
+            self.verify(targets, scope: scope, mayVanish: mayVanish, stage: "after the spin-down",
+                        claim: "Nothing is claimed as safe to power off.")
+        }
+        guard let before = verified.snapshot?.kernelMounts else { return (fullRead(), []) }
+        guard let now = discovery.kernelMounts() else {
+            return (fullRead(), ["The kernel mount table could not be read after the spin-down, "
+                                 + "so the disks were read again."])
+        }
+        let appeared = Self.mountsAppeared(since: before, now: now)
+        guard !appeared.isEmpty else { return (verified, []) }
+        let points = appeared.map { printable($0.mountPoint) }.joined(separator: ", ")
+        return (fullRead(), ["Mounted since the verified read: \(points). "
+                             + "The disks were read again to see what it is."])
+    }
+
+    /// The mounts in `now` that were not in `before`: backed by a disk, and
+    /// not one of the running system's own. A network share or devfs is not
+    /// on any drive, and the system's volumes are never DrivePark's to hold.
+    static func mountsAppeared(since before: [KernelMount], now: [KernelMount]) -> [KernelMount] {
+        func key(_ mount: KernelMount) -> String { mount.source + "\u{0}" + mount.mountPoint }
+        let known = Set(before.map(key))
+        return now.filter { mount in
+            mount.bsdDevice != nil && !isProtectedMountPoint(mount.mountPoint)
+                && !known.contains(key(mount))
         }
     }
 

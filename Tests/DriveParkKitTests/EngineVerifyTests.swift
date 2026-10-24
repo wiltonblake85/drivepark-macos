@@ -10,6 +10,10 @@
 // whole veto. It keeps what the fresh read shows parked and drops the rest;
 // with no fresh read it still keeps nothing new. The tests that asserted an
 // empty veto after a partial park now assert exactly that subset.
+//
+// 2026-10-14: the check after the spin-down asks the kernel's mount table and
+// reads the disks again only when something new is mounted. Its own tests are
+// in AfterSpinDownTests.
 
 import XCTest
 @testable import DriveParkKit
@@ -247,6 +251,8 @@ final class EngineVerifyTests: XCTestCase {
             .success(Tower.snapshot(mounted: [Tower.backup])),
             .success(Tower.snapshot()),
             .success(Tower.snapshot(mounted: [Tower.backup]))])
+        // The kernel's mount table after the eject has Backup in it again.
+        discovery.mountTables = [[Tower.kernelMount(Tower.bays[2])]]
         let ops = FakeOps()
         let outcome = engine(discovery, ops).park()
 
@@ -254,13 +260,16 @@ final class EngineVerifyTests: XCTestCase {
         XCTAssertEqual(discovery.calls, 3)
         XCTAssertFalse(outcome.parked)
         XCTAssertFalse(outcome.safeToPowerOff)
-        // The read after the spin-down is the one that counts: Backup is back
-        // and is let go; the two it still shows unmounted stay held.
+        // Something new in the table, so the disks are read again, and that
+        // read is the one that counts: Backup is back and is let go; the two
+        // it still shows unmounted stay held.
         XCTAssertEqual(ops.vetoedVolumeUUIDs, [Tower.bottomDrawer, Tower.plex])
+        XCTAssertTrue(outcome.notes.contains { $0.contains("Mounted since the verified read: /Volumes/Backup") },
+                      outcome.notes.joined(separator: "\n"))
         XCTAssertTrue(outcome.notes.contains { $0.contains("mounted again after the spin-down") })
     }
 
-    func testVerifiedParkReadsTwiceAndKeepsTheVeto() {
+    func testVerifiedParkChecksTheMountTableAndKeepsTheVeto() {
         let discovery = FakeDiscovery([.success(Tower.snapshot(mounted: [Tower.backup])),
                                        .success(Tower.snapshot())])
         let ops = FakeOps()
@@ -268,20 +277,12 @@ final class EngineVerifyTests: XCTestCase {
 
         XCTAssertTrue(outcome.parked)
         XCTAssertTrue(outcome.safeToPowerOff)
-        XCTAssertEqual(discovery.calls, 3)
+        XCTAssertTrue(ops.events.contains("eject disk25"))
+        // A read before the park and one after the unmount. After the
+        // spin-down, the kernel's mount table, and no third read.
+        XCTAssertEqual(discovery.calls, 2)
+        XCTAssertEqual(discovery.mountTableCalls, 1)
         XCTAssertEqual(ops.vetoedVolumeUUIDs, Tower.all)
-    }
-
-    func testFailedReadAfterTheSpinDownIsNotParked() {
-        let discovery = FakeDiscovery([.success(Tower.snapshot(mounted: [Tower.backup])),
-                                       .success(Tower.snapshot()),
-                                       .failure(StalledRead())])
-        let ops = FakeOps()
-        let outcome = engine(discovery, ops).park()
-
-        XCTAssertFalse(outcome.parked)
-        XCTAssertFalse(outcome.safeToPowerOff)
-        XCTAssertEqual(ops.vetoedVolumeUUIDs, [])
     }
 
     // MARK: - H4: force touches what was confirmed, found fresh
@@ -363,8 +364,9 @@ final class EngineVerifyTests: XCTestCase {
     // MARK: - The veto's lifecycle
 
     func testMountDropsTheVeto() {
+        // The park reads twice (the check after its spin-down is the mount
+        // table, 2026-10-14), then the mount reads before and after.
         let discovery = FakeDiscovery([.success(Tower.snapshot(mounted: [Tower.backup])),
-                                       .success(Tower.snapshot()),
                                        .success(Tower.snapshot()),
                                        .success(Tower.snapshot()),
                                        .success(Tower.snapshot(mounted: Tower.all))])

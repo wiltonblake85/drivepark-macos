@@ -39,10 +39,11 @@ public struct PhysicalDisk: Equatable {
     public var sizeBytes: Int64 = 0
     public var removableMedia = false
     public var ejectable = false
-    /// False when `diskutil info` for this disk timed out. The disk still
-    /// exists and its volumes are still known from `diskutil list`; what is
-    /// missing is the detail, and saying so beats printing "?" as if it were
-    /// an answer.
+    /// False when this disk's details could not be read: Disk Arbitration
+    /// did not describe it (until 2026-10-24, `diskutil info` timed out). The
+    /// disk still exists and its volumes are still known from `diskutil
+    /// list`; what is missing is the detail, and saying so beats printing "?"
+    /// as if it were an answer.
     public var infoAnswered = true
     public var containers: [Container] = []
     public var directVolumes: [Volume] = []
@@ -60,10 +61,17 @@ public struct DiskSnapshot {
     /// entry here means the enclosure is not safe to power off, whatever the
     /// volume list says.
     public var unaccountedMounts: [UnaccountedMount]
+    /// The kernel's mount table as this read saw it, or nil when the read
+    /// kept none. A park holds the table up against it after the spin-down
+    /// instead of reading the drives again (2026-10-14): anything mounted
+    /// since this read shows up there without a single disk being asked.
+    public var kernelMounts: [KernelMount]?
 
-    public init(disks: [PhysicalDisk], unaccountedMounts: [UnaccountedMount] = []) {
+    public init(disks: [PhysicalDisk], unaccountedMounts: [UnaccountedMount] = [],
+                kernelMounts: [KernelMount]? = nil) {
         self.disks = disks
         self.unaccountedMounts = unaccountedMounts
+        self.kernelMounts = kernelMounts
     }
 
     public var verdict: PowerOffVerdict {
@@ -181,7 +189,9 @@ public func discoverExternalDisks() throws -> DiskSnapshot {
     let assembled = assembleDisks(
         physicalList: physicalList, wideList: wideList, fullList: fullList,
         bootDisks: boot,
-        info: { diskutil(["info", "-plist", $0]) },
+        // Disk Arbitration, not `diskutil info`, which waits for a sleeping
+        // drive to spin up (2026-10-24, DiskDescription.swift).
+        info: { describeDisk($0) },
         roles: apfsRoles(ofVolume:),
         imageBackingPath: { device in
             images?.first { $0.wholeDisk == device }?.resolvedImagePath
@@ -203,7 +213,7 @@ public func discoverExternalDisks() throws -> DiskSnapshot {
         let answer: DiskOrigin
         if images?.contains(where: { $0.wholeDisk == disk }) == true {
             answer = .diskImage
-        } else if let info = diskutil(["info", "-plist", disk]).plist {
+        } else if let info = describeDisk(disk).plist {
             if info["BusProtocol"] as? String == "Disk Image" {
                 answer = .diskImage
             } else if info["Internal"] as? Bool == true {
@@ -222,7 +232,8 @@ public func discoverExternalDisks() throws -> DiskSnapshot {
                                        hostsVirtualMembers: assembled.hostsVirtualMembers)
     return DiskSnapshot(disks: assembled.disks,
                         unaccountedMounts: unaccountedMounts(mounts, attribution: attribution,
-                                                             origin: origin))
+                                                             origin: origin),
+                        kernelMounts: mounts)
 }
 
 /// `diskutil info -plist /`, read once per process.

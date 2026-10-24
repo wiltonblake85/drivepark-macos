@@ -62,7 +62,7 @@ func printStatus() {
             let media = disk.removableMedia ? "removable" : "FIXED (eject cannot detach)"
             print("\(disk.device)  \(printable(disk.mediaName))  \(formatSize(disk.sizeBytes))  \(printable(disk.busProtocol))  media: \(media)")
         } else {
-            print("\(disk.device)  NOT ANSWERING (diskutil info timed out; volumes below come from diskutil list)")
+            print("\(disk.device)  NOT ANSWERING (Disk Arbitration could not describe it; volumes below come from diskutil list)")
         }
         for container in disk.containers {
             print("  container \(container.device) (store \(container.physicalStore))")

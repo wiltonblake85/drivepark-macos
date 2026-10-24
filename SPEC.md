@@ -1144,3 +1144,156 @@ Backup's 12.3 s spin-up ends; the read's open file makes Backup's unmount a
 busy refusal, and a retry asks every approver again, the poster provider
 included (it stalled on both build 57 parks, so a timed-out session is asked
 again). Not built.
+
+### "Park failed" over drives that were parked, FIXED 2026-10-14
+
+Wekesa saw "Park failed, do not undock" on the notch card and the checkmark in
+the menu bar at the same time, after the 18:52 park through the app. All three
+parks that day did it: 15:39 (46.83 s, verify 35.10), 17:05 (48.22 s, verify
+35.35), 18:52 (50.36 s, verify 36.56).
+
+The diskarbitrationd log for 18:52: the four volumes were unmounted by
+18:51:47.40. The read after the unmount finished at 47.40 to 48.27 and verified
+everything unmounted, which is why the spin-down ran: four ejects between 48.27
+and 48.33, each "success" within a millisecond. Then the second full read
+(audit H5, 983794a, 2026-10-06). Its `diskutil list` calls answered in 0.02 s.
+Its `diskutil info` calls, one disk after another, took 5.6, 7.7, 10.3 and
+12.1 s. The last two ran past the 10 s runTool timeout, discovery threw, and at
+18:52:24 the run reported "Could not verify the spin-down" with the persistent
+failure card. The app's owed read started at 18:52:24.08 and found nothing
+mounted in 1.3 s, so the checkmark went up while the persistent card stayed
+on screen. No volume mounted between the unmount and the tower going away at
+18:53:25.
+
+That read cost two more things. It had no snapshot, so `vetoAfterIncompletePark`
+put the veto back as it was before the run and nothing held the drives for
+that last minute. And it woke the drives the spin-down had just stopped.
+
+Why `diskutil info` waited is inferred, not traced. Each call reached its drive
+within seconds of that drive's STOP UNIT, and the times fall in this tower's
+spin-up range (8.7 to 12.3 s, 2026-09-08), so each call probably brought its
+drive back up. Reads against drives already at rest have not woken them:
+after a park, the next mount pays full spin-up every time (2026-10-02).
+
+The fix:
+- `DiskSnapshot.kernelMounts` keeps the kernel mount table that discovery
+  already reads for its cross-check.
+- After the spin-down, `Engine.recheckAfterSpinDown` reads only the kernel's
+  mount table (getfsstat with MNT_NOWAIT, so no process and no disk is asked)
+  and compares it with the verified read's copy. `Engine.mountsAppeared`
+  counts a mount as new when it is backed by a disk, sits outside / and
+  /System/Volumes, and was not in the copy. If nothing is new, the verified
+  read stands. If something is new, it does the full read as before, to name
+  it. It also does the full read when the table cannot be read or the
+  verified read kept no copy.
+- If that full read fails, the veto follows the read before the spin-down
+  instead of going back to how it was before the run, and the note says so.
+  If no read finished at all, audit C1 still applies.
+- The app no longer reads the disks for a disk event the last park's own check
+  already saw. DiskEvents now passes on the time of a burst's last event, and
+  `ParkOutcome.answersDiskChange` compares it with `checkedAt`. Without this,
+  the park's own unmount burst would start the same slow read and take the
+  checkmark down. That burst is reported 1.5 s after its last event, which now
+  lands just after the spin-down. A read owed for any other reason still runs.
+  A disk that appears with nothing mounted, or a volume that unmounts after
+  the verified read, waits for the next event or the 5-minute backstop.
+  Neither can make the menu say safe when it is not.
+
+Not covered, and no worse than before: a CLI park while the app is running.
+The app's read for that burst still lands near the CLI's spin-down and can
+show "cannot verify" until the next read.
+
+Tests: 171 pass. That is the 160 from before, plus 12 new ones in
+AfterSpinDownTests, minus testFailedReadAfterTheSpinDownIsNotParked, which
+the regression test replaces. Two other tests were re-scripted from three
+reads to two. Mutations:
+- Doing a full read after every spin-down fails 3 tests.
+- Dropping the fallback to the read before the spin-down fails 1.
+- Letting a failed park answer disk events fails 1.
+
+Owed: a field test on the tower. The next park through the app should log a
+verify of about 1 s instead of 35 s, post "Safe to undock", and keep the
+checkmark.
+
+### Parks refused while Throw Away sleeps, FIXED 2026-10-24
+
+Wekesa: DrivePark had not been able to park Backup 2026 "for a while." At
+17:30 Backup 2026 (disk4s2, HFS+) and Plex were mounted, and Bottom Drawer
+and Throw Away were parked under the app's veto (build 58).
+
+`park status` named the cause: "disk9 NOT ANSWERING ... diskutil info -plist
+disk9 did not answer in 10s", "COULD NOT VERIFY". Throw Away's bay, parked and
+asleep, took 12.32 s to answer `diskutil info`, and 0.78 s, then 0.18 s, once
+awake. Discovery throws when any one disk's answer is missing, and
+`Engine.run` refuses before touching anything: "Could not read the disks
+before parking, so nothing was touched." That holds for a scoped park too, so
+"Park Backup 2026" was refused over a different drive. Throw Away falls asleep
+again within about seven minutes of idle, so most parks found it asleep. The
+10-14 entry already had one of these answers at 12.1 s; that fix removed the
+read after the spin-down, not the read before the park.
+
+It went unnoticed because `record()` logged a refused park as "nothing to
+do". The screen-lock parks at 11:42, 12:55, 16:09 and 16:39 that day all said
+so, with two volumes mounted. `diag_lastPost` ("accepted: Park failed") was
+the only other trace.
+
+Ruled out: Time Machine (no destinations), the ignore list (its one UUID
+matches no current volume), open files on Backup 2026 (none). Spotlight is on
+for Backup 2026, which costs its unmount about 10 s (2026-10-02) but does not
+refuse it.
+
+Tested on the tower with a scratch probe. Throw Away was stopped with
+DADiskEject, as the courtesy spin-down does, and read three ways 20 s later:
+Disk Arbitration's description 0.001 s, the IORegistry 0.002 s, and
+`diskutil info` 12.09 s. Repeated with a 29 s gap after the description and
+the IORegistry read: `diskutil info` still took 12.13 s, so neither of them
+wakes the drive. `diskutil info` on the partition (disk9s2) woke it as well,
+12.28 s. A stop sent to a drive already asleep took 11.91 s (it wakes it
+first, as found 2026-10-02); sent to an awake one, 0.01 s.
+
+The fix:
+- Discovery reads each disk's details from Disk Arbitration instead of
+  `diskutil info` (DiskDescription.swift: `describeDisk`, which maps the
+  description onto diskutil's key names in `diskutilShapedInfo`, so
+  `assembleDisks` and its captured-plist tests are unchanged). The same goes
+  for the volume UUID fallback and for placing an unaccounted mount. Only
+  `diskutil info -plist /` remains, once per process, for the startup disk.
+- Mapping, captured from the same disks: MediaName is DADeviceModel
+  ("TDAS"), BusProtocol is DADeviceProtocol except that a disk image
+  ("Virtual Interface", model "Disk Image") stays "Disk Image", Internal
+  defaults to false, the volume UUID arrives as a CFUUID. Ejectable differs
+  (diskutil true, Disk Arbitration false for the bays); nothing reads it.
+- `describeDisk` runs on a worker with a 5 s limit and reports a timeout as a
+  stall, the way every tool call does.
+- A refused park is logged "REFUSED, nothing was touched", with the reason as
+  a private note, never "nothing to do".
+
+What it gives up: on 2026-08-31 the bridge stopped answering `diskutil info`
+on every bay while `diskutil list` worked, and that call's limit is what said
+so. A description cannot see a stalled bridge. The verdict never rested on
+it (what is mounted comes from `diskutil list` and the kernel's mount table),
+and a stall still shows in the wake read and the unmount, which have limits
+of their own.
+
+Tests: 178 pass, the 171 from before plus 7 in DiskDescriptionTests, built on
+the descriptions captured that day. Mutations, each caught: media name from
+DAMediaName (4 tests fail), no "Disk Image" mapping (1), every virtual
+interface called an image (1), the CFUUID not converted (1), Internal left
+absent (1). On the tower, with Throw Away stopped 20 s earlier, the new
+`park status` read all four bays in 2.02 s, then 0.55 s, with nothing "NOT
+ANSWERING", and `diskutil info disk9` right after still took 12.05 s, so the
+drive had slept through it. `.build/release/park` is rebuilt.
+
+Installed 18:09 with build-app.sh (the bundle still says build 58: the
+number is the commit count, and nothing is committed since 10-14). The
+restart dropped the veto on Bottom Drawer and Throw Away; both stayed
+unmounted.
+
+Field test, 18:11, Throw Away stopped at about 18:07 and not read by diskutil since: Wekesa
+clicked "Park Backup 2026". `park (manual, one drive): 17.19s total
+(discover 0.10, wake 5.96, images 0.02, unmount 10.80, verify 0.28,
+spin-down 0.01)`, disk4s2 unmounted in 1 attempt, card "Backup 2026 parked",
+veto held on it. Discovery, the step that refused every park, took 0.10 s.
+The 10.80 s unmount is the open Photos stall (2026-10-11): diskarbitrationd
+logged PhotosReliveWidget and PhotosPosterProvider "not responding" at
+18:11:41.18. This is the first time PhotosReliveWidget has been named.
